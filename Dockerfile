@@ -9,7 +9,8 @@
 #   docker compose up app          # with the Postgres from docker-compose.yml
 #
 # Runtime configuration is by environment, see backend/server.py. Inside the container the checkout cache and the
-# local object store default to /data, so mount a volume there unless OPENARTIFACT_STORE_URL points at S3.
+# local object store default to /data, so mount a volume there unless OPENARTIFACT_STORE_URL points at a bucket
+# (gs://, s3://; obstore reads the credentials from the environment).
 
 # --- openartifact.js and the web app -----------------------------------------
 FROM node:24-slim AS frontend
