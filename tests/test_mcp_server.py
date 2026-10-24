@@ -76,6 +76,24 @@ async def head_sha(artifact: str) -> str | None:
     return await db.pool().fetchval('SELECT head_sha FROM artifacts WHERE id = $1', uuid.UUID(artifact))
 
 
+async def test_template_and_style_library_tools(me: auth.Principal):
+    template = artifact_id(await mcp_server.new_template('Weekly report', type='document'))
+    style = artifact_id(await mcp_server.new_style('Blue', ':root {--accent: blue}'))
+    listing = await mcp_server.list_presets()
+    assert template in listing and style in listing
+    copy = artifact_id(await mcp_server.new_from_template(template, title='Week 1', style=style))
+    assert (files_of(me, copy) / 'main.md').read_text().startswith('# Your document')
+    assert 'blue' in (files_of(me, copy) / 'styles.css').read_text()
+    saved = artifact_id(await mcp_server.save_preset(copy, 'Another report', 'template'))
+    await mcp_server.apply_style(copy, style)
+    await mcp_server.remove_preset(saved)
+    assert saved not in await mcp_server.list_presets()
+    with pytest.raises(ToolError, match='template'):
+        await mcp_server.new_from_template(style)
+    with pytest.raises(ToolError):
+        await mcp_server.new_style('Bad', '@import "missing.css";')
+
+
 # --- new_artifact ----------------------------------------------------------
 
 
@@ -390,6 +408,8 @@ async def test_skill_is_served(me: auth.Principal):
     skill_file = ROOT / 'skills' / 'openartifact' / 'SKILL.md'
     async with Client(mcp_server.mcp) as client:
         resources = {str(r.uri): r for r in await client.list_resources()}
+        assert 'skill://openartifact-templates/SKILL.md' in resources
+        assert await client.read_resource('skill://openartifact-templates/SKILL.md')
         assert mcp_server.SKILL_URI in resources
         description = resources[mcp_server.SKILL_URI].description
         assert description is not None and description.startswith('Create a deck, document or page with OpenArtifact.')
@@ -424,6 +444,13 @@ async def test_tools_over_mcp(me: auth.Principal, pool: None):
             'set_access',
             'fork',
             'list_artifacts',
+            'list_presets',
+            'save_preset',
+            'new_template',
+            'new_style',
+            'new_from_template',
+            'apply_style',
+            'remove_preset',
         }
         # The Google-style docstrings are split: the lead is the description, `Args:` entries describe parameters.
         description = tools['new_personal_artifact'].description or ''

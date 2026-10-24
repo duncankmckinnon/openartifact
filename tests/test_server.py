@@ -768,6 +768,13 @@ async def test_mcp_over_http(live_server: str):
             'set_access',
             'fork',
             'list_artifacts',
+            'list_presets',
+            'save_preset',
+            'new_template',
+            'new_style',
+            'new_from_template',
+            'apply_style',
+            'remove_preset',
         }
         created = await client.call_tool(
             'new_personal_artifact', {'title': 'Demo', 'content': '# Demo\n', 'public': True}

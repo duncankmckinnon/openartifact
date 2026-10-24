@@ -39,7 +39,9 @@ from pathlib import Path
 from typing import Any, Literal, get_args
 from urllib.parse import quote
 
+import presets
 import render
+import styles as css_styles
 from fastmcp import FastMCP
 from fastmcp.exceptions import ToolError
 from fastmcp.server.providers.skills import SkillProvider
@@ -73,6 +75,7 @@ THEMES: tuple[str, ...] = get_args(Theme)
 # The authoring guide, exposed as an MCP skill; its directory name is the skill name.
 SKILL_DIR = ROOT / 'skills' / 'openartifact'
 SKILL_URI = f'skill://{SKILL_DIR.name}/SKILL.md'
+TEMPLATE_SKILL_DIR = ROOT / 'skills' / 'openartifact-templates'
 
 # What the agent reads before it starts: `backend/instructions.md`, with the mount path and the skill URI filled in.
 INSTRUCTIONS_PATH = Path(__file__).with_name('instructions.md')
@@ -190,6 +193,7 @@ async def create_artifact(
     org_editable: bool,
     organization_id: uuid.UUID | None,
     styles: str | None = None,
+    style: workspace.Artifact | None = None,
 ) -> uuid.UUID:
     """What the two creation tools and the web app share: write `artifact.toml`, `main.md` and, when given,
     `styles.css` in one edit.
@@ -200,6 +204,10 @@ async def create_artifact(
     problem = access.check_access(visibility, org_editable, organization_id)
     if problem is not None:
         raise ToolError(problem)
+    appearance = None
+    if style is not None:
+        async with workspace.open_artifact(style) as directory:
+            appearance = await asyncio.to_thread(presets.style_files, directory)
     artifact_id = uuid.uuid4()
     config = {'title': title, 'type': type, 'theme': theme}
     create = workspace.NewArtifact(
@@ -215,6 +223,11 @@ async def create_artifact(
         (tx.path / 'main.md').write_text(content, encoding='utf-8')
         if styles is not None:
             (tx.path / 'styles.css').write_text(styles, encoding='utf-8')
+        if appearance is not None:
+            await asyncio.to_thread(presets.install_style, tx.path, *appearance)
+            await asyncio.to_thread(
+                build.build_html, tx.path, markdown_url=f'../{artifact_id}.md', css_validator=css_styles.validate
+            )
     return artifact_id
 
 
@@ -432,7 +445,9 @@ async def build_artifact(artifact: str) -> str:
     async with workspace.open_artifact(found) as directory:
         try:
             # Plain file reads and writes, kept off the event loop.
-            html_path = await asyncio.to_thread(build.build_html, directory, markdown_url=f'../{found.id}.md')
+            html_path = await asyncio.to_thread(
+                build.build_html, directory, markdown_url=f'../{found.id}.md', css_validator=css_styles.validate
+            )
         except build.BuildError as exc:
             raise ToolError(f'error: {exc}') from exc
         size = html_path.stat().st_size
@@ -513,6 +528,155 @@ async def list_artifacts() -> str:
     return ''.join(lines)
 
 
+async def resolve_preset(value: str, kind: presets.Kind | None = None) -> workspace.Artifact:
+    """Resolve a library entry only in the caller's own workspace."""
+    principal = await auth.current_principal()
+    found = await workspace.get_artifact_in(principal.workspace_id, parse_artifact_id(value))
+    if found is None or found.preset_kind is None:
+        raise ToolError('library entry not found; use `list_presets`')
+    if kind and found.preset_kind != kind:
+        raise ToolError(f'choose a saved {kind} from `list_presets`')
+    return found
+
+
+@contextlib.asynccontextmanager
+async def preset_errors() -> AsyncGenerator[None]:
+    """Report failed library edits as actionable MCP errors."""
+    try:
+        yield
+    except (build.BuildError, workspace.ArtifactBusy) as exc:
+        raise ToolError(str(exc)) from exc
+
+
+async def list_presets() -> str:
+    """List your private template and style library, with identifiers and preview URLs."""
+    principal = await auth.current_principal()
+    entries = await workspace.list_artifacts(principal.workspace_id)
+    return (
+        ''.join(
+            f'{a.id}  {a.preset_kind}  {a.type}  {a.title}  {artifact_url(a.id)}\n'
+            for a in entries
+            if a.preset_kind is not None
+        )
+        or 'No saved templates or styles yet.\n'
+    )
+
+
+async def save_preset(artifact: str, name: str, kind: presets.Kind) -> str:
+    """Save an artifact as a private template snapshot or its appearance as a reusable style.
+
+    The source is unchanged. Templates copy source files without history; styles copy only CSS, its local
+    images and fonts, and the base theme. Returns the new library artifact's identifier and preview URL.
+
+    Args:
+        artifact: An artifact you can view.
+        name: A name for the library entry.
+        kind: `template` for content and layout, `style` for appearance only.
+    """
+    source = await resolve(artifact)
+    principal = await auth.current_principal()
+    async with preset_errors():
+        found = await presets.save(source, principal.workspace_id, name, kind)
+    return await created(found.id, True)
+
+
+async def new_template(title: str, type: ArtifactType = 'deck', theme: Theme | None = None) -> str:
+    """Create a private template starter to build from a description with the template-authoring skill.
+
+    Read `skill://openartifact-templates/SKILL.md`, edit the returned artifact with `run_code`, and build it.
+    The web editor automatically loads that skill for this template's chat.
+
+    Args:
+        title: A name for the reusable template.
+        type: The artifact type this template will create.
+        theme: Optional base theme; defaults to the type's standard theme.
+    """
+    import agent
+
+    principal = await auth.current_principal()
+    async with preset_errors():
+        found = await presets.create(
+            principal.workspace_id, title, type, kind='template', theme=theme or agent.DEFAULT_THEMES[type]
+        )
+    return await created(found.id, True)
+
+
+async def new_style(title: str, css: str, theme: Theme = 'light') -> str:
+    """Save CSS and a base theme as a private reusable style, with a preview page.
+
+    Local image/font references must already exist: save an existing artifact's style with `save_preset`
+    to include its assets. CSS imports must be combined into a single stylesheet first.
+
+    Args:
+        title: A name for the style.
+        css: The stylesheet to save.
+        theme: The base theme underneath the custom CSS.
+    """
+    principal = await auth.current_principal()
+    async with preset_errors():
+        found = await presets.create(principal.workspace_id, title, 'page', kind='style', css=css, theme=theme)
+    return await created(found.id, True)
+
+
+async def new_from_template(
+    template: str,
+    title: str | None = None,
+    content: str | None = None,
+    style: str | None = None,
+    public: bool = False,
+) -> str:
+    """Create an independent personal artifact from a saved template, private by default.
+
+    The template keeps its type and source files; later template edits do not affect this copy. Use
+    `set_access` to change sharing afterward.
+
+    Args:
+        template: A template identifier from `list_presets`.
+        title: Optional title for the new artifact.
+        content: Optional replacement markdown; omit to keep the template's starter content.
+        style: Optional saved style identifier from your library.
+        public: Whether anyone with the link may view the new artifact.
+    """
+    principal = await auth.current_principal()
+    source = await resolve_preset(template, 'template')
+    appearance = await resolve_preset(style, 'style') if style else None
+    async with preset_errors():
+        found = await presets.instantiate(
+            source,
+            principal.workspace_id,
+            title=title,
+            content=content,
+            style=appearance,
+            visibility='public' if public else 'private',
+        )
+    return await created(found.id, True)
+
+
+async def apply_style(artifact: str, style: str) -> str:
+    """Apply one of your saved styles to an editable artifact, preserving content and components.
+
+    Args:
+        artifact: The target artifact identifier.
+        style: A saved style identifier from `list_presets`.
+    """
+    target = await resolve(artifact, edit=True)
+    source = await resolve_preset(style, 'style')
+    async with preset_errors():
+        await presets.apply_style(target, source)
+    return await build_artifact(artifact)
+
+
+async def remove_preset(preset: str) -> str:
+    """Remove an entry from your library, keeping its artifact, history and existing copies.
+
+    Args:
+        preset: A template or style identifier from `list_presets`.
+    """
+    found = await resolve_preset(preset)
+    await presets.remove(found)
+    return f'Removed {found.title} from your library. Its artifact is retained.\n'
+
+
 mcp.tool(new_personal_artifact)
 mcp.tool(new_org_artifact)
 mcp.tool(run_code)
@@ -522,4 +686,7 @@ mcp.tool(upload_url)
 mcp.tool(set_access)
 mcp.tool(fork)
 mcp.tool(list_artifacts)
+for tool in (list_presets, save_preset, new_template, new_style, new_from_template, apply_style, remove_preset):
+    mcp.tool(tool)
 mcp.add_provider(SkillProvider(SKILL_DIR))
+mcp.add_provider(SkillProvider(TEMPLATE_SKILL_DIR))

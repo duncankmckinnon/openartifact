@@ -26,6 +26,17 @@ Tools
 - fork(artifact, org_editable=False, public=False): copy an artifact you can see into one of your own, history
   included.
 - list_artifacts(): your artifacts, and the ones your organisation shares with you.
+- list_presets(): your personal library of templates and styles.
+- new_template(title, type, theme): create a private reusable template. Read the template-authoring skill at
+  skill://openartifact-templates/SKILL.md, then use run_code and build to create the layout from the user's
+  description. The web editor loads this skill automatically when chatting about a template.
+- save_preset(artifact, name, kind): save an independent private template or style snapshot. A template copies
+  current source files; a style retains only CSS, its local images/fonts, and the base theme.
+- new_style(title, css, theme): save pasted CSS as a reusable private style with a preview page.
+- new_from_template(template, title, content, style, public=False): create an independent personal artifact,
+  optionally replacing its markdown or applying a saved style. Omit content to keep the starter content.
+- apply_style(artifact, style): replace appearance on an editable artifact while keeping content and layout.
+- remove_preset(preset): remove library membership; its artifact, history and existing copies are kept.
 
 Artifacts shared with you read-only can be read and built but not edited: fork them first.
 

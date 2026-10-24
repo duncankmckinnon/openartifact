@@ -2,10 +2,11 @@
 
 import { Eye, FileText, Pencil, Plug, Presentation, ScrollText } from 'lucide-react'
 import { type ReactNode, useEffect, useState } from 'react'
-import { type Artifact, type ArtifactType, api, type ArtifactList as Listing, type Me } from '../api.ts'
+import { type Artifact, type ArtifactType, api, type ArtifactList as Listing, type Me, type Presets } from '../api.ts'
 import { Header } from '../components/Header.tsx'
+import { ArtifactLibrary, Library } from '../components/Library.tsx'
 import { McpDialog } from '../components/McpDialog.tsx'
-import { Badge, Button, LinkButton, Spinner } from '../components/ui.tsx'
+import { Badge, Button, LinkButton, Select, Spinner } from '../components/ui.tsx'
 import { navigate } from '../router.ts'
 
 const TYPES: Array<{ value: ArtifactType; label: string; hint: string; icon: ReactNode }> = [
@@ -23,7 +24,7 @@ function since(iso: string): string {
 }
 
 /** One artifact, a full-width row: title and details on the left, the badge and the actions on the right. */
-function Card({ artifact, domain }: { artifact: Artifact; domain: string | null }) {
+function Card({ artifact, domain, onChanged }: { artifact: Artifact; domain: string | null; onChanged: () => void }) {
   return (
     <li className="flex flex-wrap items-center gap-3 rounded-xl border border-line bg-panel px-4 py-3">
       <div className="min-w-0 flex-1">
@@ -39,6 +40,7 @@ function Card({ artifact, domain }: { artifact: Artifact; domain: string | null 
         domain={artifact.visibility === 'org' ? domain : null}
       />
       <div className="flex gap-2">
+        <ArtifactLibrary artifact={artifact} onChanged={onChanged} />
         {artifact.can_edit ? (
           <Button
             variant="primary"
@@ -58,14 +60,16 @@ function Card({ artifact, domain }: { artifact: Artifact; domain: string | null 
 
 /** The three ways to start: one click creates an artifact of that type with a placeholder title, a theme that
  * suits it and a page or two to replace, and opens the editor; the chat's first turn names it. */
-function Starters() {
+function Starters({ styles }: { styles: Artifact[] }) {
   const [busy, setBusy] = useState<ArtifactType | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const [style, setStyle] = useState('')
   const start = async (type: ArtifactType) => {
     setBusy(type)
     setError(null)
     try {
-      const created = await api.create({ type })
+      const selectedStyle = styles.some((entry) => entry.id === style) ? style : undefined
+      const created = await api.create({ type, style_id: selectedStyle })
       navigate(`/edit/${created.id}`)
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
@@ -75,6 +79,24 @@ function Starters() {
   return (
     <section className="mb-8">
       <h2 className="mb-3 font-semibold">New</h2>
+      {styles.length ? (
+        <label htmlFor="starter-style" className="mb-3 flex items-center gap-3 text-xs text-muted">
+          Style
+          <Select
+            id="starter-style"
+            value={styles.some((entry) => entry.id === style) ? style : ''}
+            onChange={(e) => setStyle(e.target.value)}
+            disabled={busy !== null}
+          >
+            <option value="">Default for this type</option>
+            {styles.map((entry) => (
+              <option key={entry.id} value={entry.id}>
+                {entry.title}
+              </option>
+            ))}
+          </Select>
+        </label>
+      ) : null}
       <div className="grid gap-3 sm:grid-cols-3">
         {TYPES.map((option) => (
           <button
@@ -106,17 +128,25 @@ export function ArtifactList() {
   const [listing, setListing] = useState<Listing | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [mcpOpen, setMcpOpen] = useState(false)
+  const [presets, setPresets] = useState<Presets>({ templates: [], styles: [] })
+  const refreshLibrary = async () => {
+    const [entries, artifacts] = await Promise.all([api.presets(), api.artifacts()])
+    setPresets(entries)
+    setListing(artifacts)
+  }
 
   useEffect(() => {
-    Promise.all([api.me(), api.artifacts()])
-      .then(([me, listing]) => {
+    Promise.all([api.me(), api.artifacts(), api.presets()])
+      .then(([me, listing, presets]) => {
         setMe(me)
         setListing(listing)
+        setPresets(presets)
       })
       .catch((err: unknown) => setError(err instanceof Error ? err.message : String(err)))
   }, [])
 
   const domain = me?.organization?.domain ?? null
+  const mine = listing?.mine.filter((entry) => !entry.preset_kind) ?? []
   return (
     <div className="flex min-h-full flex-col">
       <Header me={me}>
@@ -138,17 +168,18 @@ export function ArtifactList() {
           <Spinner />
         ) : (
           <>
-            {me ? <Starters /> : null}
+            {me ? <Starters styles={presets.styles} /> : null}
+            {me ? <Library entries={presets} refresh={refreshLibrary} /> : null}
             <section className="mb-8">
               <h2 className="mb-3 font-semibold">Mine</h2>
-              {listing.mine.length === 0 ? (
+              {mine.length === 0 ? (
                 <p className="rounded-xl border border-dashed border-line p-8 text-center text-sm text-muted">
                   Nothing yet. Start one above, or from an agent over MCP.
                 </p>
               ) : (
                 <ul className="grid gap-3">
-                  {listing.mine.map((a) => (
-                    <Card key={a.id} artifact={a} domain={domain} />
+                  {mine.map((a) => (
+                    <Card key={a.id} artifact={a} domain={domain} onChanged={() => void refreshLibrary()} />
                   ))}
                 </ul>
               )}
@@ -158,7 +189,7 @@ export function ArtifactList() {
                 <h2 className="mb-3 font-semibold">Shared with you{domain ? ` at ${domain}` : ''}</h2>
                 <ul className="grid gap-3">
                   {listing.shared.map((a) => (
-                    <Card key={a.id} artifact={a} domain={domain} />
+                    <Card key={a.id} artifact={a} domain={domain} onChanged={() => void refreshLibrary()} />
                   ))}
                 </ul>
               </section>

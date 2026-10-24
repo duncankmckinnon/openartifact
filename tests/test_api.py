@@ -44,6 +44,112 @@ def test_api_requires_sign_in(client: TestClient):
     assert client.post('/api/artifacts', json={'title': 'x'}).status_code == 401
 
 
+def test_personal_library_workflow(client: TestClient):
+    original = starter(client)
+    template = client.post(
+        '/api/presets', json={'artifact_id': str(original.id), 'name': 'My deck', 'kind': 'template'}
+    )
+    assert template.status_code == 201, template.text
+    template = template.json()
+    assert template['preset_kind'] == 'template'
+    style = client.post('/api/presets', json={'name': 'Purple', 'kind': 'style', 'css': ':root {--accent: purple}'})
+    assert style.status_code == 201, style.text
+    style = style.json()
+    entries = client.get('/api/presets').json()
+    assert [a['id'] for a in entries['templates']] == [template['id']]
+    assert [a['id'] for a in entries['styles']] == [style['id']]
+    created = client.post(
+        '/api/artifacts', json={'template_id': template['id'], 'style_id': style['id'], 'title': 'Copy'}
+    )
+    assert created.status_code == 201, created.text
+    created = created.json()
+    assert (created['type'], created['title'], created['preset_kind']) == ('deck', 'Copy', None)
+    applied = client.post(f'/api/artifacts/{original.id}/style', json={'style_id': style['id']})
+    assert applied.status_code == 200, applied.text
+    assert 'purple' in client.get(f'/artifacts/{original.id}/styles.css').text
+    assert client.delete(f'/api/presets/{template["id"]}').status_code == 204
+    assert client.get('/api/presets').json()['templates'] == []
+    assert client.get(f'/artifacts/{template["id"]}/').status_code == 200
+
+
+def test_library_permissions_and_invalid_inputs(client: TestClient):
+    original = starter(client)
+    colleague, outsider = org_members(client)
+    style = client.post('/api/presets', json={'name': 'Brand', 'kind': 'style', 'css': 'p {color:red}'}).json()
+    assert client.post('/api/artifacts', json={'template_id': style['id']}).status_code == 400
+    assert client.post('/api/presets', json={'name': ' ', 'kind': 'template'}).status_code == 400
+    assert client.post('/api/presets', json={'name': 'Bad', 'kind': 'style', 'css': '</style>'}).status_code == 400
+    assert client.post('/api/presets', json={'name': 'Bad', 'kind': 'style'}).status_code == 400
+    assert client.post('/api/presets', json={'name': 'Bad', 'kind': 'other'}).status_code == 422
+    cross = {'sec-fetch-site': 'cross-site'}
+    assert client.post('/api/presets', json={'name': 'Cross', 'kind': 'template'}, headers=cross).status_code == 403
+    assert client.delete(f'/api/presets/{style["id"]}', headers=cross).status_code == 403
+    client.patch(f'/api/artifacts/{style["id"]}', json={'public': True})
+    client.patch(f'/api/artifacts/{original.id}', json={'placement': 'org', 'public': False})
+    sign_in(client, colleague)
+    assert client.get('/api/presets').json() == {'templates': [], 'styles': []}
+    assert client.post('/api/artifacts', json={'style_id': style['id']}).status_code == 404
+    assert client.delete(f'/api/presets/{style["id"]}').status_code == 404
+    assert client.post(f'/api/artifacts/{original.id}/style', json={'style_id': style['id']}).status_code == 403
+    saved = client.post('/api/presets', json={'artifact_id': str(original.id), 'name': 'Team copy', 'kind': 'template'})
+    assert saved.status_code == 201
+    sign_in(client, outsider)
+    assert (
+        client.post(
+            '/api/presets', json={'artifact_id': str(original.id), 'name': 'Hidden', 'kind': 'template'}
+        ).status_code
+        == 404
+    )
+    sign_out(client)
+    assert client.get('/api/presets').status_code == 401
+
+
+def test_create_template_for_description_workflow(client: TestClient):
+    starter(client)
+    response = client.post('/api/presets', json={'name': 'Board report', 'kind': 'template', 'type': 'document'})
+    assert response.status_code == 201, response.text
+    template = response.json()
+    assert (template['type'], template['preset_kind'], template['visibility']) == ('document', 'template', 'private')
+    assert client.get(f'/artifacts/{template["id"]}/').status_code == 200
+
+
+def test_source_edit_survives_invalid_config_and_respects_custom_paths(client: TestClient):
+    artifact = starter(client)
+
+    async def break_config() -> None:
+        async with workspace.edit(artifact.id, 'invalid config') as tx:
+            (tx.path / 'artifact.toml').write_text('theme = "typo"\nmarkdown = "notes.md"\n')
+            (tx.path / 'notes.md').write_text('# Custom source\n')
+
+    in_app(client, break_config)
+    read = client.get(f'/api/artifacts/{artifact.id}/source')
+    assert read.status_code == 200, read.text
+    assert read.json()['content'] == '# Custom source\n'
+    response = client.put(f'/api/artifacts/{artifact.id}/source', json={'content': '# Keep my edits\n'})
+    assert response.status_code == 200, response.text
+    assert 'invalid theme' in response.json()['build_error']
+    assert (workspace.checkout_path(artifact.id) / 'notes.md').read_text() == '# Keep my edits\n'
+
+
+def test_new_artifact_with_a_saved_style_and_on_demand_css_validation(client: TestClient):
+    starter(client)
+    style = client.post('/api/presets', json={'name': 'Blue', 'kind': 'style', 'css': 'p {color: blue}'}).json()
+    response = client.post('/api/artifacts', json={'type': 'page', 'style_id': style['id']})
+    assert response.status_code == 201, response.text
+    artifact = response.json()
+    assert client.get(f'/artifacts/{artifact["id"]}/').status_code == 200
+
+    async def missing_css_asset() -> None:
+        async with workspace.edit(uuid.UUID(artifact['id']), 'responsive CSS with missing asset') as tx:
+            (tx.path / 'styles.css').write_text('p {background: image-set("missing.svg" 1x)}')
+            (tx.path / 'dist/index.html').unlink(missing_ok=True)
+
+    in_app(client, missing_css_asset)
+    page = client.get(f'/artifacts/{artifact["id"]}/')
+    assert page.status_code == 422, page.text
+    assert 'CSS asset not found' in page.text
+
+
 def test_me_and_configure(client: TestClient, monkeypatch: pytest.MonkeyPatch):
     artifact = starter(client)
     colleague, _ = org_members(client)

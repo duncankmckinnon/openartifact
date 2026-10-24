@@ -82,6 +82,7 @@ class Artifact:
     forked_from: uuid.UUID | None
     created_at: datetime
     updated_at: datetime
+    preset_kind: str | None = None
 
     @classmethod
     def from_row(cls, row: asyncpg.Record) -> Artifact:
@@ -97,6 +98,7 @@ class Artifact:
             forked_from=row['forked_from'],
             created_at=row['created_at'],
             updated_at=row['updated_at'],
+            preset_kind=row['preset_kind'],
         )
 
 
@@ -112,6 +114,7 @@ ARTIFACT_FIELDS = (
     'forked_from',
     'created_at',
     'updated_at',
+    'preset_kind',
 )
 ARTIFACT_COLUMNS = ', '.join(ARTIFACT_FIELDS)
 
@@ -132,6 +135,7 @@ class NewArtifact:
     org_editable: bool = False
     organization_id: uuid.UUID | None = None
     forked_from: uuid.UUID | None = None
+    preset_kind: str | None = None
 
 
 @dataclass(frozen=True)
@@ -359,7 +363,7 @@ async def edit(artifact_id: uuid.UUID, message: str, *, create: NewArtifact | No
         if create is not None:
             row = await conn.fetchrow(
                 'INSERT INTO artifacts (id, workspace_id, title, type, visibility, org_editable, organization_id, '
-                f'forked_from) VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING {ARTIFACT_COLUMNS}',
+                f'forked_from, preset_kind) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING {ARTIFACT_COLUMNS}',
                 artifact_id,
                 create.workspace_id,
                 create.title,
@@ -368,6 +372,7 @@ async def edit(artifact_id: uuid.UUID, message: str, *, create: NewArtifact | No
                 create.org_editable,
                 create.organization_id,
                 create.forked_from,
+                create.preset_kind,
             )
         else:
             try:

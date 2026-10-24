@@ -27,7 +27,7 @@ import json
 import posixpath
 import re
 import tomllib
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import cast
@@ -768,7 +768,10 @@ def check_styles(css: str, path: Path) -> None:
             )
 
 
-def build_page_data(cfg: Config) -> dict[str, object]:
+CssValidator = Callable[[str, Path], None]
+
+
+def build_page_data(cfg: Config, *, css_validator: CssValidator | None = None) -> dict[str, object]:
     """Validate the inputs and gather what goes into the page: `config`, `markdown`, `components`, `styles`."""
     markdown = cfg.markdown_path.read_text(encoding='utf-8')
     split_pages(markdown, cfg.markdown_path)
@@ -778,7 +781,11 @@ def build_page_data(cfg: Config) -> dict[str, object]:
     components = {src: spec.source for src, spec in specs.items()}
     styles = cfg.styles_path.read_text(encoding='utf-8') if cfg.styles_path.is_file() else ''
     check_styles(styles, cfg.styles_path)
-    check_images([markdown, *components.values(), styles], cfg.cwd)
+    check_images([markdown, *components.values()], cfg.cwd)
+    if css_validator is None:
+        check_images([styles], cfg.cwd)
+    else:
+        css_validator(styles, cfg.cwd)
     return {
         'config': cfg.to_json(),
         'markdown': markdown,
@@ -833,6 +840,8 @@ def build_html(
     runtime_url: str = DEFAULT_RUNTIME_URL,
     markdown_url: str | None = None,
     favicon_url: str | None = DEFAULT_FAVICON_URL,
+    *,
+    css_validator: CssValidator | None = None,
 ) -> Path:
     """Build `cwd` into one HTML file (default `cwd/dist/index.html`) that loads the runtime from `runtime_url`.
 
@@ -840,9 +849,10 @@ def build_html(
     `/artifacts/<id>/`, and passes `markdown_url`, the `.md` export beside the page, which the head then advertises
     (with a note for agents) instead of the bare `main.md`. The tab icon is the artifact's own `favicon` when
     `artifact.toml` names one, else `favicon_url` (the platform's mark; `None` for no icon). Returns the path written.
+    `css_validator` lets a server provide parser-backed CSS validation without adding builder dependencies.
     """
     cfg = load_config(cwd)
-    data = build_page_data(cfg)
+    data = build_page_data(cfg, css_validator=css_validator)
     markdown_href = markdown_url or cfg.markdown_path.relative_to(cfg.cwd).as_posix()
     page = render_page(
         cfg.title or cfg.markdown_path.stem,

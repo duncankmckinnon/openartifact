@@ -207,12 +207,14 @@ export function Dialog({
   title,
   children,
   wide = false,
+  dismissible = true,
 }: {
   open: boolean
   onClose: () => void
   title: string
   children: ReactNode
   wide?: boolean
+  dismissible?: boolean
 }) {
   const ref = useRef<HTMLDialogElement>(null)
   useEffect(() => {
@@ -226,8 +228,11 @@ export function Dialog({
     <dialog
       ref={ref}
       onClose={onClose}
+      onCancel={(event) => {
+        if (!dismissible) event.preventDefault()
+      }}
       onClick={(e) => {
-        if (e.target === ref.current) onClose()
+        if (dismissible && e.target === ref.current) onClose()
       }}
       className={`m-auto ${wide ? 'w-[min(94vw,680px)]' : 'w-[min(92vw,460px)]'} rounded-xl border border-line bg-panel p-6 text-fg shadow-2xl backdrop:bg-black/60`}
     >

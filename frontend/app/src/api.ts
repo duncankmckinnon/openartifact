@@ -40,6 +40,7 @@ export interface Artifact {
   visibility: Visibility
   org_editable: boolean
   forked_from: string | null
+  preset_kind: 'template' | 'style' | null
   created_at: string
   updated_at: string
   owner_email: string | null
@@ -73,13 +74,29 @@ export interface Configure {
 
 /** What creates an artifact: the type, and whatever else the server should not default (`agent.py` has the defaults). */
 export interface NewArtifact {
-  type: ArtifactType
+  type?: ArtifactType
   title?: string
   theme?: Theme
   content?: string
   placement?: 'personal' | 'org'
   public?: boolean
   org_editable?: boolean
+  template_id?: string
+  style_id?: string
+}
+
+export interface Presets {
+  templates: Artifact[]
+  styles: Artifact[]
+}
+
+export interface NewPreset {
+  name: string
+  kind: 'template' | 'style'
+  artifact_id?: string
+  type?: ArtifactType
+  theme?: Theme
+  css?: string
 }
 
 /** The placement and permissions an `AccessChoice` stands for; `placement` is org for every choice but private. */
@@ -141,6 +158,11 @@ export const api = {
   configure: () => request<Configure>('/api/configure'),
   artifacts: () => request<ArtifactList>('/api/artifacts'),
   create: (body: NewArtifact) => request<Artifact>('/api/artifacts', { method: 'POST', body: JSON.stringify(body) }),
+  presets: () => request<Presets>('/api/presets'),
+  savePreset: (body: NewPreset) => request<Artifact>('/api/presets', { method: 'POST', body: JSON.stringify(body) }),
+  removePreset: (id: string) => request<void>(`/api/presets/${id}`, { method: 'DELETE' }),
+  applyStyle: (id: string, styleId: string) =>
+    request<Artifact>(`/api/artifacts/${id}/style`, { method: 'POST', body: JSON.stringify({ style_id: styleId }) }),
   setAccess: (id: string, body: AccessFields) =>
     request<Artifact>(`/api/artifacts/${id}`, { method: 'PATCH', body: JSON.stringify(body) }),
   chat: (id: string) => request<{ messages: unknown[]; model: string | null }>(`/api/artifacts/${id}/chat`),

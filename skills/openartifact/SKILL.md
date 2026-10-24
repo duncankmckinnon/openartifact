@@ -255,4 +255,9 @@ Token colours derive from the artifact's accent variables, so a brand palette in
 
 ## `styles.css`
 
+For reusable templates and the personal style library, read `skill://openartifact-templates/SKILL.md`.
+In OpenArtifact's template editor that skill is loaded automatically. `new_template` creates a template
+starter, `save_preset` snapshots an existing artifact, and `new_from_template` creates an independent copy.
+`list_presets`, `new_style` and `apply_style` manage reusable appearance; each copy keeps its own files.
+
 The base stylesheet handles all layout, typography, page dimensions, transitions and the print `@page` setup. `styles.css` only overrides CSS variables on `:root` to set brand colours and fonts, and adds rules on the class hooks when the variables are not enough. The variable contract, the layout helpers, the class hooks and the steps for mapping a brand palette are in `references/styles.md`; read it before writing any CSS.

@@ -21,6 +21,7 @@ dependencies = [
     "pydantic-ai-slim[anthropic,mcp,openai]==2.54.0",
     "python-pptx>=1.0.2",
     "python-docx>=1.2.0",
+    "tinycss2>=1.5.1",
 ]
 
 # Not a package: backend/ is a handful of modules imported by path (pytest and pyright add it to the path), with
@@ -40,6 +41,7 @@ dev = [
     "basedpyright>=1.29",
     "pytest>=8",
     "ruff>=0.12",
+    "types-tinycss2>=1.5.1.20260414",
 ]
 # What chrome/Dockerfile installs: the chrome service alone, without the application server's stack.
 chrome = [
