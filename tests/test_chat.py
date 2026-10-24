@@ -35,6 +35,7 @@ def scripted(new_markdown: str) -> FunctionModel:
     """A model that rewrites main.md with `run_code`, builds, then answers; on later turns it just answers."""
 
     async def stream(messages: list[ModelMessage], info: AgentInfo) -> AsyncIterator[str | DeltaToolCalls]:
+        assert 'Reusable template authoring' not in (info.instructions or '')
         returns = tool_returns(messages)
         # Only this turn's tool returns count: those after the last user prompt.
         last_user = max(
@@ -74,6 +75,42 @@ def use_model(monkeypatch: pytest.MonkeyPatch, model: FunctionModel) -> None:
         return model
 
     monkeypatch.setattr(agent, 'resolve_model', resolve)
+
+
+def test_description_creates_a_reusable_template_with_the_bundled_skill(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+):
+    starter(client)
+    template = client.post('/api/presets', json={'name': 'Team updates', 'kind': 'template', 'type': 'page'}).json()
+    reusable = "# {{ TEAM }} update\n\n## Highlights\n\nReplace this sample with this week's highlights.\n"
+
+    async def stream(messages: list[ModelMessage], info: AgentInfo) -> AsyncIterator[str | DeltaToolCalls]:
+        instructions = info.instructions or ''
+        # This model's tool behavior depends on receiving the template-specific authoring contract.
+        if 'Reusable template authoring' not in instructions:
+            yield 'Template authoring instructions were not provided.'
+            return
+        returns = tool_returns(messages)
+        if not returns:
+            args = {
+                'artifact': template['id'],
+                'code': "from pathlib import Path\nPath('main.md').write_text(md)\n"
+                "p = Path('artifact.toml')\np.write_text(p.read_text() + '\\n[context]\\nTEAM = \\\"Your team\\\"\\n')",
+                'inputs': {'md': reusable},
+            }
+            yield {0: DeltaToolCall(name='run_code', json_args=json.dumps(args))}
+        elif len(returns) == 1:
+            yield {0: DeltaToolCall(name='build', json_args=json.dumps({'artifact': template['id']}))}
+        else:
+            yield 'Your reusable template is ready.'
+
+    use_model(monkeypatch, FunctionModel(stream_function=stream))
+    chunks = send(client, template['id'], 'Create a reusable team update template with highlights and a team name.')
+    assert not any(c.get('type') == 'error' for c in chunks), chunks
+    assert client.get(f'/api/artifacts/{template["id"]}/source').json()['content'] == reusable
+    copy = client.post('/api/artifacts', json={'template_id': template['id']})
+    assert copy.status_code == 201, copy.text
+    assert client.get(f'/artifacts/{copy.json()["id"]}/').status_code == 200
 
 
 def send(client: TestClient, artifact_id: Any, text: str, model: str | None = 'test') -> list[dict[str, Any]]:

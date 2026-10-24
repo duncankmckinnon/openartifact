@@ -280,4 +280,6 @@ def about_this_run(ctx: RunContext[ChatDeps]) -> str:
             f' The user is looking at page {ctx.deps.page} right now: "this slide" or "this page" means that one, '
             'unless they say otherwise.'
         )
+    if artifact.preset_kind == 'template':
+        about += '\n\n' + (mcp_server.TEMPLATE_SKILL_DIR / 'SKILL.md').read_text(encoding='utf-8')
     return about

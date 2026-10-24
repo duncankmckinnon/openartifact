@@ -17,10 +17,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import tomllib
 import uuid
 from collections.abc import AsyncIterator
+from pathlib import Path
 from typing import Any, Literal
 
+import presets
 from fastapi import APIRouter, HTTPException, Request, Response
 from fastmcp.exceptions import ToolError
 from pydantic import BaseModel, TypeAdapter
@@ -89,6 +92,7 @@ def artifact_json(
         'visibility': found.visibility,
         'org_editable': found.org_editable,
         'forked_from': str(found.forked_from) if found.forked_from else None,
+        'preset_kind': found.preset_kind,
         'created_at': found.created_at.isoformat(),
         'updated_at': found.updated_at.isoformat(),
         'owner_email': owner_email,
@@ -149,13 +153,15 @@ async def list_artifacts(request: Request) -> dict[str, object]:
 class NewArtifactBody(BaseModel):
     """What the app sends to create an artifact; everything but `type` has a default fit for the type (`agent.py`)."""
 
-    type: mcp_server.ArtifactType = 'deck'
+    type: mcp_server.ArtifactType | None = None
     title: str | None = None
     theme: mcp_server.Theme | None = None
     content: str | None = None
     placement: Literal['personal', 'org'] = 'personal'
     public: bool = False
     org_editable: bool = False
+    template_id: str | None = None
+    style_id: str | None = None
 
 
 @router.post('/artifacts', status_code=201)
@@ -164,11 +170,16 @@ async def create_artifact(body: NewArtifactBody, request: Request) -> dict[str, 
     unless given. The placeholder title is replaced after the chat's first turn (`agent.suggest_title`)."""
     mutation(request)
     viewer = await viewer_required(request)
-    title = (body.title or '').strip() or agent.DEFAULT_TITLES[body.type]
-    theme = body.theme or agent.DEFAULT_THEMES[body.type]
+    template = await preset_for(body.template_id, viewer, 'template') if body.template_id else None
+    style = await preset_for(body.style_id, viewer, 'style') if body.style_id else None
+    artifact_type = body.type or (template.type if template else 'deck')
+    if template and body.type and body.type != template.type:
+        raise HTTPException(400, 'a template keeps its artifact type')
+    title = (body.title or '').strip() or (template.title if template else agent.DEFAULT_TITLES[artifact_type])
+    theme = body.theme or agent.DEFAULT_THEMES[artifact_type]
     # The type's placeholder pages and stylesheet when no content is given; given content gets no stylesheet.
-    content = body.content if body.content is not None else agent.STARTER_CONTENT[body.type]
-    styles = None if body.content is not None else agent.STARTER_STYLES[body.type]
+    content = body.content if body.content is not None else agent.STARTER_CONTENT[artifact_type]
+    styles = None if body.content is not None else agent.STARTER_STYLES[artifact_type]
     if body.placement == 'org':
         if viewer.organization_id is None:
             raise HTTPException(400, 'your account is not in an organisation')
@@ -178,22 +189,129 @@ async def create_artifact(body: NewArtifactBody, request: Request) -> dict[str, 
         organization_id = None
         visibility = 'public' if body.public else 'private'
     try:
+        if template is not None:
+            if body.theme is not None:
+                raise HTTPException(400, 'choose a saved style to override a template theme')
+            found = await presets.instantiate(
+                template,
+                viewer.workspace_id,
+                title=title,
+                content=body.content,
+                style=style,
+                visibility=visibility,
+                organization_id=organization_id,
+                org_editable=body.org_editable if body.placement == 'org' else False,
+            )
+            return artifact_json(found, viewer, viewer.email)
         artifact_id = await mcp_server.create_artifact(
             viewer,
             title=title,
             content=content,
-            type=body.type,
+            type=artifact_type,  # pyright: ignore[reportArgumentType]
             theme=theme,  # pyright: ignore[reportArgumentType]  (a Theme or a value of DEFAULT_THEMES, kept in step by a test)
             visibility=visibility,
             org_editable=body.org_editable if body.placement == 'org' else False,
             organization_id=organization_id,
             styles=styles,
+            style=style,
         )
-    except ToolError as exc:
+    except (ToolError, build.BuildError) as exc:
         raise HTTPException(400, str(exc)) from exc
+    except workspace.ArtifactBusy as exc:
+        raise HTTPException(409, str(exc)) from exc
     found = await workspace.get_artifact(artifact_id)
     assert found is not None
     return artifact_json(found, viewer, viewer.email)
+
+
+async def preset_for(preset_id: str, viewer: auth.Principal, kind: presets.Kind | None = None) -> workspace.Artifact:
+    """A personal library entry; public visibility never grants access to someone else's library."""
+    found = await artifact_for(preset_id, viewer)
+    if found.workspace_id != viewer.workspace_id or found.preset_kind is None:
+        raise HTTPException(404, 'library entry not found')
+    if kind and found.preset_kind != kind:
+        raise HTTPException(400, f'choose a saved {kind}')
+    return found
+
+
+@router.get('/presets')
+async def list_presets(request: Request) -> dict[str, object]:
+    """The signed-in user's reusable templates and styles."""
+    viewer = await viewer_required(request)
+    entries = await workspace.list_artifacts(viewer.workspace_id)
+    return {
+        'templates': [artifact_json(a, viewer) for a in entries if a.preset_kind == 'template'],
+        'styles': [artifact_json(a, viewer) for a in entries if a.preset_kind == 'style'],
+    }
+
+
+class PresetBody(BaseModel):
+    """Save a snapshot, or create a template starter or a style from CSS."""
+
+    name: str
+    kind: presets.Kind
+    artifact_id: str | None = None
+    type: mcp_server.ArtifactType = 'deck'
+    theme: mcp_server.Theme | None = None
+    css: str | None = None
+
+
+@router.post('/presets', status_code=201)
+async def save_preset(body: PresetBody, request: Request) -> dict[str, object]:
+    """Save a reusable private entry without changing the source artifact."""
+    mutation(request)
+    viewer = await viewer_required(request)
+    try:
+        if body.artifact_id:
+            if body.css is not None or body.theme is not None:
+                raise HTTPException(400, 'a snapshot uses the source artifact styles and theme')
+            source = await artifact_for(body.artifact_id, viewer)
+            found = await presets.save(source, viewer.workspace_id, body.name, body.kind)
+        else:
+            if body.kind == 'style' and body.css is None:
+                raise HTTPException(400, 'provide CSS or choose an existing artifact')
+            found = await presets.create(
+                viewer.workspace_id,
+                body.name,
+                'page' if body.kind == 'style' else body.type,
+                kind=body.kind,
+                css=body.css,
+                theme=body.theme or agent.DEFAULT_THEMES['page' if body.kind == 'style' else body.type],
+            )
+    except build.BuildError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except workspace.ArtifactBusy as exc:
+        raise HTTPException(409, str(exc)) from exc
+    return artifact_json(found, viewer, viewer.email)
+
+
+@router.delete('/presets/{preset_id}', status_code=204)
+async def remove_preset(preset_id: str, request: Request) -> Response:
+    """Remove a library entry; its files and already-created artifacts are retained."""
+    mutation(request)
+    viewer = await viewer_required(request)
+    await presets.remove(await preset_for(preset_id, viewer))
+    return Response(status_code=204)
+
+
+class StyleBody(BaseModel):
+    style_id: str
+
+
+@router.post('/artifacts/{artifact_id}/style')
+async def apply_style(artifact_id: str, body: StyleBody, request: Request) -> dict[str, object]:
+    """Replace appearance while preserving content and layout, in a validated commit."""
+    mutation(request)
+    viewer = await viewer_required(request)
+    target = await artifact_for(artifact_id, viewer, edit=True)
+    style = await preset_for(body.style_id, viewer, 'style')
+    try:
+        await presets.apply_style(target, style)
+    except build.BuildError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except workspace.ArtifactBusy as exc:
+        raise HTTPException(409, str(exc)) from exc
+    return artifact_json(await presets.saved(target.id), viewer)
 
 
 class AccessBody(BaseModel):
@@ -241,7 +359,7 @@ async def get_source(artifact_id: str, request: Request) -> dict[str, object]:
     viewer = await viewer_required(request)
     found = await artifact_for(artifact_id, viewer)
     async with workspace.open_artifact(found) as directory:
-        path = directory / MAIN_MD
+        path = markdown_source(directory)
         if not path.is_file():
             raise HTTPException(404, f'{MAIN_MD} not found')
         content = await asyncio.to_thread(path.read_text, encoding='utf-8')
@@ -250,6 +368,19 @@ async def get_source(artifact_id: str, request: Request) -> dict[str, object]:
 
 class SourceBody(BaseModel):
     content: str
+
+
+def markdown_source(directory: Path) -> Path:
+    """Resolve the editable source safely, even when unrelated build settings are temporarily invalid."""
+    try:
+        config_path = presets.contained(directory, directory / 'artifact.toml')
+        raw = tomllib.loads(config_path.read_text(encoding='utf-8')) if config_path.is_file() else {}
+        value = raw.get('markdown') or MAIN_MD
+        if not isinstance(value, str) or Path(value).is_absolute():
+            raise build.BuildError('markdown must be a relative path inside the artifact')
+        return presets.contained(directory, directory / value)
+    except (build.BuildError, tomllib.TOMLDecodeError) as exc:
+        raise HTTPException(400, str(exc)) from exc
 
 
 @router.put('/artifacts/{artifact_id}/source')
@@ -266,7 +397,9 @@ async def put_source(artifact_id: str, body: SourceBody, request: Request) -> di
     found = await artifact_for(artifact_id, viewer, edit=True)
     try:
         async with workspace.edit(found.id, f'edit {MAIN_MD}') as tx:
-            await asyncio.to_thread((tx.path / MAIN_MD).write_text, body.content, encoding='utf-8')
+            path = markdown_source(tx.path)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            await asyncio.to_thread(path.write_text, body.content, encoding='utf-8')
     except workspace.ArtifactBusy as exc:
         raise HTTPException(409, str(exc)) from exc
     build_error: str | None = None

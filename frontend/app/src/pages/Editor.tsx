@@ -26,6 +26,7 @@ import type { DeckController, DeckPosition } from '../../../src/deck.ts'
 import { type AccessChoice, type Artifact, accessFields, accessOf, api, findArtifact, type Me } from '../api.ts'
 import { Chat } from '../chat/Chat.tsx'
 import { Header } from '../components/Header.tsx'
+import { ArtifactLibrary } from '../components/Library.tsx'
 import { McpDialog } from '../components/McpDialog.tsx'
 import { Badge, Button, LinkButton, Select, Spinner } from '../components/ui.tsx'
 import { type EditMode, MarkdownEditor } from '../editor/MarkdownEditor.tsx'
@@ -269,7 +270,12 @@ function Workbench({
   return (
     <div className="flex min-h-0 flex-1 flex-col md:flex-row">
       <aside className="flex h-[45vh] w-full shrink-0 flex-col border-b border-line bg-panel md:h-auto md:w-[420px] md:border-r md:border-b-0">
-        <Chat artifactId={artifact.id} page={page} onChanged={reload} />
+        <Chat
+          artifactId={artifact.id}
+          isTemplate={artifact.preset_kind === 'template'}
+          page={page}
+          onChanged={reload}
+        />
       </aside>
       <main className="flex min-h-0 flex-1 flex-col">
         <div className="flex h-10 shrink-0 items-center gap-3 border-b border-line bg-panel px-3">
@@ -393,6 +399,11 @@ export function Editor({ id }: { id: string }) {
           <ArrowLeft size={14} />
         </Button>
         <h1 className="truncate font-semibold">{artifact.title}</h1>
+        {artifact.preset_kind ? (
+          <span className="rounded border border-accent/40 px-2 text-xs text-accent">
+            {artifact.preset_kind === 'template' ? 'Template' : 'Style'}
+          </span>
+        ) : null}
         <Badge
           visibility={artifact.visibility}
           orgEditable={artifact.org_editable}
@@ -400,6 +411,7 @@ export function Editor({ id }: { id: string }) {
         />
         {artifact.can_manage ? <AccessSelect artifact={artifact} domain={domain} onChange={setArtifact} /> : null}
         <span className="flex-1" />
+        <ArtifactLibrary artifact={artifact} onChanged={reload} />
         <Button
           onClick={() => setPromptOpen(true)}
           className="h-7"

@@ -31,6 +31,7 @@ from collections.abc import Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import cast
+from urllib.parse import unquote, urlsplit
 
 # Where the page loads the runtime from; `server.py` serves it there.
 DEFAULT_RUNTIME_URL = '/openartifact.js'
@@ -663,6 +664,41 @@ def check_body_placeholders(markdown: str, path: Path, names: frozenset[str]) ->
 HTML_SRC_RE = re.compile(r"""\bsrc\s*=\s*(["'])(?P<path>[^"']+)\1""", re.IGNORECASE)
 MD_IMAGE_RE = re.compile(r'!\[[^\]]*\]\(\s*(?P<path>[^)\s]+)')
 CSS_URL_RE = re.compile(r"""url\(\s*(["']?)(?P<path>[^"')]+)\1\s*\)""", re.IGNORECASE)
+# Skip comments and ordinary strings while recognizing quoted and escaped CSS URL contents.
+CSS_TOKEN_RE = re.compile(
+    r"""/\*.*?\*/|\burl\(\s*(?:"(?P<double>(?:\\.|[^"\\])*)"|"""
+    r"'(?P<single>(?:\\.|[^'\\])*)'|(?P<bare>(?:\\.|[^()\s\"'\\])*))\s*\)"
+    r"""|"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*' """,
+    re.IGNORECASE | re.DOTALL | re.VERBOSE,
+)
+CSS_ESCAPE_RE = re.compile(r'\\([0-9a-fA-F]{1,6}\s?|\r\n|[\r\n\f]|.)', re.DOTALL)
+
+
+@dataclass(frozen=True)
+class CssUrl:
+    """A CSS URL's decoded value and its source span, for validation and asset relocation."""
+
+    start: int
+    end: int
+    path: str
+
+
+def css_urls(source: str) -> Iterator[CssUrl]:
+    """Read CSS URLs without mistaking comments or quoted content strings for asset references."""
+
+    def unescape(match: re.Match[str]) -> str:
+        value = match[1]
+        if value[0] in '\r\n\f':
+            return ''
+        if value[0] in '0123456789abcdefABCDEF':
+            code = int(value.rstrip(), 16)
+            return chr(code) if 0 < code <= 0x10FFFF and not 0xD800 <= code <= 0xDFFF else '\ufffd'
+        return value
+
+    for match in CSS_TOKEN_RE.finditer(source):
+        value = next((part for part in match.groups() if part is not None), None)
+        if value is not None:
+            yield CssUrl(match.start(), match.end(), CSS_ESCAPE_RE.sub(unescape, value))
 
 
 def is_external(path: str) -> bool:
@@ -670,7 +706,7 @@ def is_external(path: str) -> bool:
     return path.startswith('/') or re.match(r'^[a-z][a-z0-9+.-]*:', path, re.IGNORECASE) is not None
 
 
-def check_images(texts: list[str], base: Path) -> list[str]:
+def check_images(texts: list[str], base: Path, *, css: bool = False) -> list[str]:
     """Find relative image references in `texts` and check each file exists; returns the normalised paths, sorted.
 
     Nothing is embedded: the browser fetches the images from the server relative to the page URL. The check only
@@ -680,19 +716,29 @@ def check_images(texts: list[str], base: Path) -> list[str]:
     for text in texts:
         # A <component src="X.svg"> is a component reference, not an image; its children may still hold images.
         text = COMPONENT_START_RE.sub('', text)
-        for regex in HTML_SRC_RE, MD_IMAGE_RE, CSS_URL_RE:
-            for match in regex.finditer(text):
-                raw = match.group('path')
-                if is_external(raw) or not raw.lower().endswith(IMAGE_EXTS):
-                    continue
-                key = posixpath.normpath(raw)
-                if key in found:
-                    continue
-                if key.startswith('..'):
-                    raise BuildError(f'image {raw!r} escapes the deck directory')
-                if not (base / key).is_file():
-                    raise BuildError(f'image not found: {base / key} (referenced as {raw!r})')
-                found.append(key)
+        references = (
+            [url.path for url in css_urls(text)]
+            if css
+            else [
+                match.group('path')
+                for regex in (HTML_SRC_RE, MD_IMAGE_RE, CSS_URL_RE)
+                for match in regex.finditer(text)
+            ]
+        )
+        for raw in references:
+            if is_external(raw):
+                continue
+            image_path = unquote(urlsplit(raw).path) if css else raw
+            if not image_path.lower().endswith(IMAGE_EXTS):
+                continue
+            key = posixpath.normpath(image_path)
+            if key in found:
+                continue
+            if key.startswith('..'):
+                raise BuildError(f'image {raw!r} escapes the deck directory')
+            if not (base / key).is_file():
+                raise BuildError(f'image not found: {base / key} (referenced as {raw!r})')
+            found.append(key)
     return sorted(found)
 
 
@@ -778,7 +824,8 @@ def build_page_data(cfg: Config) -> dict[str, object]:
     components = {src: spec.source for src, spec in specs.items()}
     styles = cfg.styles_path.read_text(encoding='utf-8') if cfg.styles_path.is_file() else ''
     check_styles(styles, cfg.styles_path)
-    check_images([markdown, *components.values(), styles], cfg.cwd)
+    check_images([markdown, *components.values()], cfg.cwd)
+    check_images([styles], cfg.cwd, css=True)
     return {
         'config': cfg.to_json(),
         'markdown': markdown,

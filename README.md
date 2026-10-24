@@ -112,6 +112,33 @@ DATE = "October 2026"     # {{ DATE }} anywhere
 
 The four built-in themes split on two axes: light vs dark backgrounds, and whether markdown-source decorations (`#` heading prefixes, `**` strong markers, diamond bullets) render on top. Pick `light` or `dark` for a clean baseline; pick a `markdown-*` variant for the opinionated annotated look.
 
+### Your templates and styles
+
+The home screen's **Templates & styles** library keeps reusable starting points in your personal space.
+
+- **Create template** starts a deck, document or page from your description. Describe the recurring sections,
+  layouts, colors and fields you want to replace each time. OpenArtifact's bundled
+  [`openartifact-templates` skill](skills/openartifact-templates/SKILL.md) guides the editing chat, builds the
+  files and shows the live preview. This uses the server's existing configured model. Continue refining it in
+  chat, then choose **Use template** from the home screen to create a private artifact with independent files.
+- In an artifact's editor, **Library** can save its current files as a template, or save its appearance as a
+  style. Templates include markdown, configuration, components and assets. Styles contain CSS, its local
+  images and WOFF fonts, and the base theme, with a separate preview page. Snapshots include no source history
+  or conversation, and the original artifact is unchanged.
+- **Add style** accepts pasted CSS or a local `.css` file. Choose its base theme and save it. To include local
+  assets, first add them to an artifact and save its style from the editor. Combine CSS `@import` statements
+  into one stylesheet before saving.
+- Choose a saved style when starting an artifact or using a template, or apply it through an existing
+  artifact's **Library** dialog. Applying a style replaces CSS and base theme while preserving markdown,
+  components and artifact type. Style assets get their own directory so existing assets keep working.
+- **Remove** takes an entry out of the library; its artifact, history and existing copies remain. Changes to
+  a template or style affect future copies and applications only.
+
+MCP offers the same workflows through `list_presets`, `new_template`, `save_preset`, `new_style`,
+`new_from_template`, `apply_style` and `remove_preset`. Connected agents can read
+`skill://openartifact-templates/SKILL.md`. Library entries start private and can only be selected from their
+owner's library; normal artifact access rules still govern their pages and editing.
+
 `styles.css` overrides any of the CSS variables in the base stylesheet:
 
 ```css

@@ -11,11 +11,13 @@ import { DefaultChatTransport, isToolUIPart, type UIMessage } from 'ai'
 import { ArrowUp, Square, Trash2 } from 'lucide-react'
 import { type KeyboardEvent, useEffect, useMemo, useRef, useState } from 'react'
 import { api, type ModelChoice } from '../api.ts'
+import { templateBriefKey } from '../components/Library.tsx'
 import { Button, Spinner } from '../components/ui.tsx'
 import { Message } from './Message.tsx'
 
 interface ChatProps {
   artifactId: string
+  isTemplate?: boolean
   /** The page the preview shows, 1-based, sent with each message so the agent knows what "this slide" means. */
   page: number | null
   /** Called when the artifact may have changed: a `build` finished, or a turn ended. */
@@ -56,7 +58,7 @@ export function Chat(props: ChatProps) {
   return <Conversation {...props} loaded={loaded} />
 }
 
-function Conversation({ artifactId, page, onChanged, loaded }: ChatProps & { loaded: Loaded }) {
+function Conversation({ artifactId, isTemplate, page, onChanged, loaded }: ChatProps & { loaded: Loaded }) {
   const configured = loaded.models.some((m) => m.id === loaded.model) ? loaded.model : loaded.defaultModel
   const [model, setModel] = useState<string | null>(configured)
   // Refs, so the transport (created once) reads the current choice and page when a message is sent.
@@ -64,7 +66,9 @@ function Conversation({ artifactId, page, onChanged, loaded }: ChatProps & { loa
   modelRef.current = model
   const pageRef = useRef(page)
   pageRef.current = page
-  const [draft, setDraft] = useState('')
+  const [initialBrief] = useState(() => (isTemplate ? sessionStorage.getItem(templateBriefKey(artifactId)) : null))
+  const [draft, setDraft] = useState(initialBrief ?? '')
+  const pendingBrief = useRef(initialBrief)
   const bottom = useRef<HTMLDivElement>(null)
 
   const transport = useMemo(
@@ -87,6 +91,16 @@ function Conversation({ artifactId, page, onChanged, loaded }: ChatProps & { loa
     onFinish: () => onChanged(),
   })
 
+  useEffect(() => {
+    if (!pendingBrief.current || !model || status !== 'ready') return
+    const text = pendingBrief.current
+    pendingBrief.current = null
+    sessionStorage.removeItem(templateBriefKey(artifactId))
+    if (loaded.messages.length !== 0) return
+    setDraft('')
+    void sendMessage({ text })
+  }, [artifactId, loaded.messages.length, model, sendMessage, status])
+
   // Reload the preview as soon as a build has finished, before the model's closing words arrive.
   const builds = useRef(0)
   useEffect(() => {
@@ -107,6 +121,8 @@ function Conversation({ artifactId, page, onChanged, loaded }: ChatProps & { loa
   const send = () => {
     const text = draft.trim()
     if (!text || busy || !model) return
+    pendingBrief.current = null
+    sessionStorage.removeItem(templateBriefKey(artifactId))
     setDraft('')
     void sendMessage({ text })
   }
@@ -128,11 +144,17 @@ function Conversation({ artifactId, page, onChanged, loaded }: ChatProps & { loa
       <div className="flex-1 space-y-4 overflow-y-auto px-4 py-4">
         {messages.length === 0 ? (
           <div className="mt-8 text-center text-sm text-muted">
-            <p className="font-medium text-fg">Ask for a change</p>
+            <p className="font-medium text-fg">{isTemplate ? 'Describe your template' : 'Ask for a change'}</p>
             <p className="mt-1">
-              "Add a page about pricing", "make the headings blue", "turn the bullet list into a table".
+              {isTemplate
+                ? 'Describe its recurring sections, layouts, colors and fields to replace each time.'
+                : '"Add a page about pricing", "make the headings blue", "turn the bullet list into a table".'}
             </p>
-            <p className="mt-1">The agent edits the files, rebuilds, and the preview refreshes.</p>
+            <p className="mt-1">
+              {isTemplate
+                ? 'The template-authoring skill builds it in your private library. Refine the preview, then choose Use template from the home screen.'
+                : 'The agent edits the files, rebuilds, and the preview refreshes.'}
+            </p>
           </div>
         ) : null}
         {messages.map((message) => (
@@ -155,7 +177,9 @@ function Conversation({ artifactId, page, onChanged, loaded }: ChatProps & { loa
             rows={3}
             placeholder={
               model
-                ? 'Describe the change (Enter to send, Shift+Enter for a new line)'
+                ? isTemplate
+                  ? 'Describe your reusable template (Enter to send)'
+                  : 'Describe the change (Enter to send, Shift+Enter for a new line)'
                 : 'No model is configured on this server'
             }
             disabled={!model}
