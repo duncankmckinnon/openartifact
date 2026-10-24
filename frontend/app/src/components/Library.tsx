@@ -184,6 +184,7 @@ export function Library({ entries, refresh }: { entries: Presets; refresh: () =>
       </div>
       <Dialog
         open={mode !== null}
+        dismissible={!busy}
         onClose={() => {
           if (!busy) setMode(null)
         }}
@@ -346,6 +347,7 @@ export function ArtifactLibrary({ artifact, onChanged }: { artifact: Artifact; o
       </Button>
       <Dialog
         open={open}
+        dismissible={!busy}
         onClose={() => {
           if (!busy) setOpen(false)
         }}

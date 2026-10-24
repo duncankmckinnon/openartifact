@@ -20,7 +20,7 @@ Let a signed-in user keep reusable starting points and visual styles, then use t
 
 These are proposed defaults, not additional user requirements.
 
-- Keep React, FastAPI, Postgres, the current builder and the current artifact source format. Add no package dependencies.
+- Keep React, FastAPI, Postgres, the current builder and the current artifact source format. Following review, the user approved tinycss2 for server-side CSS parsing and rewriting. The builder remains dependency-free and can receive a server-provided CSS validator.
 - Template creation uses the existing model configuration, permissions and chat history. A missing model is shown clearly through the existing model picker; creating a template does not require adding another provider or background job. The template editor explains that chat creates a reusable template and encourages a concrete description.
 - Library entries are ordinary, private artifact snapshots with an optional `preset_kind` metadata field (`template` or `style`). This uses the existing versioned storage and editor. The API and UI identify library entries separately from ordinary artifacts.
 - Style snapshots contain a small preview page, normalized configuration, one stylesheet, and its referenced local assets. They do not contain the source artifact's content or history.

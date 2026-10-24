@@ -17,6 +17,7 @@ import uuid
 from pathlib import Path
 
 import httpx2
+import styles
 
 import build
 import config
@@ -71,7 +72,9 @@ async def ensure_built(found: workspace.Artifact, directory: Path) -> Path:
     """
     page = directory / 'dist' / 'index.html'
     if not page.is_file():
-        await asyncio.to_thread(build.build_html, directory, markdown_url=f'../{found.id}.md')
+        await asyncio.to_thread(
+            build.build_html, directory, markdown_url=f'../{found.id}.md', css_validator=styles.validate
+        )
     return page
 
 

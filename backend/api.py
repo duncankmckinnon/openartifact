@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 import presets
+import styles
 from fastapi import APIRouter, HTTPException, Request, Response
 from fastmcp.exceptions import ToolError
 from pydantic import BaseModel, TypeAdapter
@@ -405,7 +406,9 @@ async def put_source(artifact_id: str, body: SourceBody, request: Request) -> di
     build_error: str | None = None
     async with workspace.open_artifact(found) as directory:
         try:
-            await asyncio.to_thread(build.build_html, directory, markdown_url=f'../{found.id}.md')
+            await asyncio.to_thread(
+                build.build_html, directory, markdown_url=f'../{found.id}.md', css_validator=styles.validate
+            )
         except build.BuildError as exc:
             build_error = str(exc).replace(f'{directory}/', '')
             (directory / 'dist' / 'index.html').unlink(missing_ok=True)

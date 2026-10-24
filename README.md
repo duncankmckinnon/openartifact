@@ -128,6 +128,9 @@ The home screen's **Templates & styles** library keeps reusable starting points 
 - **Add style** accepts pasted CSS or a local `.css` file. Choose its base theme and save it. To include local
   assets, first add them to an artifact and save its style from the editor. Combine CSS `@import` statements
   into one stylesheet before saving.
+  Server-side CSS handling uses tinycss2, including escaped URLs and responsive `image-set()` references.
+  CSS is limited to 1 MB of UTF-8 text and bounded syntax complexity; a saved style can contain up to 256 local
+  assets totaling 20 MB. The standalone builder remains dependency-free; server builds supply its CSS validator.
 - Choose a saved style when starting an artifact or using a template, or apply it through an existing
   artifact's **Library** dialog. Applying a style replaces CSS and base theme while preserving markdown,
   components and artifact type. Style assets get their own directory so existing assets keep working.

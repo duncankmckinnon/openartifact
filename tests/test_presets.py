@@ -164,3 +164,54 @@ async def test_css_import_text_and_empty_urls_are_not_dependencies(principal: au
         css='.page::after {content: "Use @import carefully"} .page {background: url()}',
     )
     assert style.preset_kind == 'style'
+
+
+async def test_saved_style_copies_and_rewrites_image_set_assets(principal: auth.Principal, tmp_path: Path):
+    source = await source_artifact(principal, tmp_path)
+    async with workspace.edit(source.id, 'responsive background') as tx:
+        (tx.path / 'look.css').write_text(
+            r'.page {background: image-set("assets/mark.svg#logo" 1x, u\72l("assets/mark.svg") 2x)}'
+        )
+    style = await presets.save(source, principal.workspace_id, 'Responsive', 'style')
+    target = await presets.create(principal.workspace_id, 'Target', 'page', kind='template')
+    await presets.apply_style(target, style)
+    async with workspace.open_artifact(target) as directory:
+        images = list((directory / 'assets').rglob('mark.svg'))
+        assert len(images) == 1 and images[0].read_text().startswith('<svg')
+        css = build.load_config(directory).styles_path.read_text()
+        assert 'image-set(' in css and '#logo' in css
+        assert '"assets/mark.svg' not in css
+
+
+async def test_applying_style_preserves_escaped_sample_text(principal: auth.Principal):
+    style = await presets.create(
+        principal.workspace_id,
+        'Code samples',
+        'page',
+        kind='style',
+        css=r'.page::after {content: "\3c /style>"}',
+    )
+    target = await presets.create(principal.workspace_id, 'Target', 'page', kind='template')
+    await presets.apply_style(target, style)
+    async with workspace.open_artifact(target) as directory:
+        css = build.load_config(directory).styles_path.read_text()
+        build.check_styles(css, directory / 'styles.css')
+        assert (directory / 'dist/index.html').is_file()
+
+
+def test_saved_style_bounds_asset_bytes_before_reading(tmp_path: Path):
+    (tmp_path / 'main.md').write_text('# Preview\n')
+    (tmp_path / 'styles.css').write_text('p {background: url(large.png)}')
+    with (tmp_path / 'large.png').open('wb') as asset:
+        asset.truncate(20_000_001)
+    with pytest.raises(build.BuildError, match='20 MB'):
+        presets.style_files(tmp_path)
+
+
+def test_saved_style_bounds_local_asset_count(tmp_path: Path):
+    (tmp_path / 'main.md').write_text('# Preview\n')
+    for index in range(257):
+        (tmp_path / f'image{index}.svg').write_text('<svg/>')
+    (tmp_path / 'styles.css').write_text('p {background: ' + ','.join(f'url(image{i}.svg)' for i in range(257)) + '}')
+    with pytest.raises(build.BuildError, match='256'):
+        presets.style_files(tmp_path)

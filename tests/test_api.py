@@ -131,6 +131,25 @@ def test_source_edit_survives_invalid_config_and_respects_custom_paths(client: T
     assert (workspace.checkout_path(artifact.id) / 'notes.md').read_text() == '# Keep my edits\n'
 
 
+def test_new_artifact_with_a_saved_style_and_on_demand_css_validation(client: TestClient):
+    starter(client)
+    style = client.post('/api/presets', json={'name': 'Blue', 'kind': 'style', 'css': 'p {color: blue}'}).json()
+    response = client.post('/api/artifacts', json={'type': 'page', 'style_id': style['id']})
+    assert response.status_code == 201, response.text
+    artifact = response.json()
+    assert client.get(f'/artifacts/{artifact["id"]}/').status_code == 200
+
+    async def missing_css_asset() -> None:
+        async with workspace.edit(uuid.UUID(artifact['id']), 'responsive CSS with missing asset') as tx:
+            (tx.path / 'styles.css').write_text('p {background: image-set("missing.svg" 1x)}')
+            (tx.path / 'dist/index.html').unlink(missing_ok=True)
+
+    in_app(client, missing_css_asset)
+    page = client.get(f'/artifacts/{artifact["id"]}/')
+    assert page.status_code == 422, page.text
+    assert 'CSS asset not found' in page.text
+
+
 def test_me_and_configure(client: TestClient, monkeypatch: pytest.MonkeyPatch):
     artifact = starter(client)
     colleague, _ = org_members(client)

@@ -12,6 +12,8 @@ from pathlib import Path
 from typing import Literal, cast
 from urllib.parse import quote, unquote, urlsplit
 
+import styles
+
 import access
 import build
 import db
@@ -111,21 +113,20 @@ def style_files(directory: Path) -> tuple[str, str, dict[str, bytes]]:
     cfg = configuration(directory)
     css = cfg.styles_path.read_text(encoding='utf-8') if cfg.styles_path.is_file() else ''
     build.check_styles(css, cfg.styles_path)
-    if re.search(r'@import\b', build.CSS_TOKEN_RE.sub(' ', css), re.IGNORECASE):
-        raise build.BuildError('CSS @import is not supported in saved styles; combine the stylesheets first')
+    sheet = styles.parse(css)
     files: dict[str, bytes] = {}
-    for url in build.css_urls(css):
-        raw = url.path
-        if not raw or raw.startswith('#') or build.is_external(raw):
+    total = 0
+    for raw in sheet.urls:
+        path = styles.asset_path(directory, raw)
+        if path is None:
             continue
-        key = unquote(urlsplit(raw).path)
-        if Path(key).suffix.lower() not in (*build.IMAGE_EXTS, '.woff', '.woff2'):
-            raise build.BuildError(f'unsupported style asset: {raw!r}; use an image or WOFF font')
-        path = contained(directory, directory / key)
-        if not key or not path.is_file():
-            raise build.BuildError(f'style asset not found: {raw!r}')
-        # Canonical keys ensure a CSS URL with ./ or percent escaping maps to the copied file.
-        files[path.relative_to(directory).as_posix()] = path.read_bytes()
+        key = path.relative_to(directory.resolve()).as_posix()
+        if key in files:
+            continue
+        total += path.stat().st_size
+        if len(files) >= styles.MAX_ASSETS or total > styles.MAX_ASSET_BYTES:
+            raise build.BuildError('CSS assets exceed the saved-style limit of 256 files and 20 MB')
+        files[key] = path.read_bytes()
     return css, cfg.theme, files
 
 
@@ -140,7 +141,7 @@ def snapshot(directory: Path) -> dict[str, bytes]:
         contained(directory, path)
         if path.is_file():
             files[relative.as_posix()] = path.read_bytes()
-    build.build_page_data(cfg)
+    build.build_page_data(cfg, css_validator=styles.validate)
     return files
 
 
@@ -160,10 +161,9 @@ def install_style(directory: Path, css: str, theme: str, files: dict[str, bytes]
     prefix = f'assets/style-{uuid.uuid4().hex}'
     write_files(directory, {f'{prefix}/{key}': data for key, data in files.items()})
 
-    def replace(url: build.CssUrl) -> str:
-        raw = url.path
+    def replace(raw: str) -> str:
         if not raw or raw.startswith('#') or build.is_external(raw):
-            return css[url.start : url.end]
+            return raw
         parts = urlsplit(raw)
         key = Path(unquote(parts.path)).as_posix()
         rewritten = quote(f'{prefix}/{key}', safe='/')
@@ -171,16 +171,10 @@ def install_style(directory: Path, css: str, theme: str, files: dict[str, bytes]
             rewritten += f'?{parts.query}'
         if parts.fragment:
             rewritten += f'#{parts.fragment}'
-        return f'url({json.dumps(rewritten, ensure_ascii=False)})'
+        return rewritten
 
     cfg.styles_path.parent.mkdir(parents=True, exist_ok=True)
-    parts: list[str] = []
-    end = 0
-    for url in build.css_urls(css):
-        parts.extend((css[end : url.start], replace(url)))
-        end = url.end
-    parts.append(css[end:])
-    cfg.styles_path.write_text(''.join(parts), encoding='utf-8')
+    cfg.styles_path.write_text(styles.parse(css).rewrite(replace), encoding='utf-8')
     configure(directory, theme=theme)
 
 
@@ -213,7 +207,9 @@ async def save(source: workspace.Artifact, workspace_id: uuid.UUID, name: str, k
             cfg = configuration(tx.path)
             configure(tx.path, title=name)
             await tx.conn.execute('UPDATE artifacts SET type = $2 WHERE id = $1', artifact_id, cfg.type)
-        await asyncio.to_thread(build.build_html, tx.path, markdown_url=f'../{artifact_id}.md')
+        await asyncio.to_thread(
+            build.build_html, tx.path, markdown_url=f'../{artifact_id}.md', css_validator=styles.validate
+        )
     return await saved(artifact_id)
 
 
@@ -235,7 +231,9 @@ async def create(
         (tx.path / 'styles.css').write_text(css if css is not None else agent.STARTER_STYLES[type], encoding='utf-8')
         if kind == 'style':
             await asyncio.to_thread(style_files, tx.path)
-        await asyncio.to_thread(build.build_html, tx.path, markdown_url=f'../{artifact_id}.md')
+        await asyncio.to_thread(
+            build.build_html, tx.path, markdown_url=f'../{artifact_id}.md', css_validator=styles.validate
+        )
     return await saved(artifact_id)
 
 
@@ -270,8 +268,10 @@ async def instantiate(
         if content is not None:
             configuration(tx.path).markdown_path.write_text(content, encoding='utf-8')
         if appearance is not None:
-            install_style(tx.path, *appearance)
-        await asyncio.to_thread(build.build_html, tx.path, markdown_url=f'../{artifact_id}.md')
+            await asyncio.to_thread(install_style, tx.path, *appearance)
+        await asyncio.to_thread(
+            build.build_html, tx.path, markdown_url=f'../{artifact_id}.md', css_validator=styles.validate
+        )
     return await saved(artifact_id)
 
 
@@ -280,8 +280,10 @@ async def apply_style(target: workspace.Artifact, style: workspace.Artifact) -> 
     async with workspace.open_artifact(style) as directory:
         appearance = await asyncio.to_thread(style_files, directory)
     async with workspace.edit(target.id, f'apply style: {style.title}') as tx:
-        install_style(tx.path, *appearance)
-        await asyncio.to_thread(build.build_html, tx.path, markdown_url=f'../{target.id}.md')
+        await asyncio.to_thread(install_style, tx.path, *appearance)
+        await asyncio.to_thread(
+            build.build_html, tx.path, markdown_url=f'../{target.id}.md', css_validator=styles.validate
+        )
 
 
 async def remove(entry: workspace.Artifact) -> None:

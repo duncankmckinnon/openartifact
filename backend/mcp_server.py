@@ -41,6 +41,7 @@ from urllib.parse import quote
 
 import presets
 import render
+import styles as css_styles
 from fastmcp import FastMCP
 from fastmcp.exceptions import ToolError
 from fastmcp.server.providers.skills import SkillProvider
@@ -223,8 +224,10 @@ async def create_artifact(
         if styles is not None:
             (tx.path / 'styles.css').write_text(styles, encoding='utf-8')
         if appearance is not None:
-            presets.install_style(tx.path, *appearance)
-            await asyncio.to_thread(build.build_html, tx.path, markdown_url=f'../{artifact_id}.md')
+            await asyncio.to_thread(presets.install_style, tx.path, *appearance)
+            await asyncio.to_thread(
+                build.build_html, tx.path, markdown_url=f'../{artifact_id}.md', css_validator=css_styles.validate
+            )
     return artifact_id
 
 
@@ -442,7 +445,9 @@ async def build_artifact(artifact: str) -> str:
     async with workspace.open_artifact(found) as directory:
         try:
             # Plain file reads and writes, kept off the event loop.
-            html_path = await asyncio.to_thread(build.build_html, directory, markdown_url=f'../{found.id}.md')
+            html_path = await asyncio.to_thread(
+                build.build_html, directory, markdown_url=f'../{found.id}.md', css_validator=css_styles.validate
+            )
         except build.BuildError as exc:
             raise ToolError(f'error: {exc}') from exc
         size = html_path.stat().st_size

@@ -12,7 +12,7 @@
 
 ## Global Constraints
 
-- Add no package dependencies; use pnpm and uv.
+- Use pnpm and uv. The user subsequently approved tinycss2 for server-side CSS handling; the builder remains dependency-free.
 - All artifact changes go through `workspace.edit()`.
 - Every template instance is independent, and library lookup is scoped to the caller's workspace.
 - Preserve artifact type and content when applying styles; copy local assets without overwriting existing files.
