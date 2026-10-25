@@ -4,6 +4,9 @@ dist/
 .DS_Store
 *.log
 .claude/settings.local.json
+# Local agent state can contain access tokens, machine paths and session content.
+/.serena/
+/.superpowers/
 tmp/
 /references/
 /examples/**/dist/
