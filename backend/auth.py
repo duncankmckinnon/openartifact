@@ -37,6 +37,7 @@ logger = logging.getLogger(__name__)
 
 DEV_SUB = 'dev'
 DEV_CLAIMS = {'sub': DEV_SUB, 'email': 'dev@localhost', 'name': 'Developer'}
+DESKTOP_CLAIMS = {'sub': 'desktop', 'email': 'local@localhost', 'name': 'Local workspace'}
 GOOGLE_SCOPES = [
     'openid',
     'https://www.googleapis.com/auth/userinfo.email',
@@ -48,7 +49,8 @@ def make_auth_provider() -> AuthProvider:
     """The `auth=` for the FastMCP server, from the environment.
 
     `GOOGLE_CLIENT_ID` (with `GOOGLE_CLIENT_SECRET` and `OPENARTIFACT_SECRET_KEY`) selects Google login;
-    otherwise `OPENARTIFACT_DEV_TOKEN` selects a single static token. Neither is a startup error: an MCP
+    otherwise `OPENARTIFACT_DESKTOP_TOKEN` or `OPENARTIFACT_DEV_TOKEN` selects a single static token.
+    No identity is a startup error: an MCP
     endpoint with no identity would create artifacts nobody owns.
     """
     client_id = os.environ.get('GOOGLE_CLIENT_ID')
@@ -75,18 +77,21 @@ def make_auth_provider() -> AuthProvider:
             jwt_signing_key=secret_key,
             client_storage=storage,
         )
+    desktop = desktop_token()
+    if desktop:
+        return StaticTokenVerifier(tokens={desktop: {'client_id': 'desktop', 'scopes': [], **DESKTOP_CLAIMS}})
     dev_token = os.environ.get('OPENARTIFACT_DEV_TOKEN')
     if dev_token:
         logger.warning('OPENARTIFACT_DEV_TOKEN is set: anyone holding that token is the development user')
         return StaticTokenVerifier(tokens={dev_token: {'client_id': DEV_SUB, 'scopes': [], **DEV_CLAIMS}})
     raise RuntimeError(
         'no authentication configured: set GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET and OPENARTIFACT_SECRET_KEY, '
-        'or OPENARTIFACT_DEV_TOKEN for local development'
+        'OPENARTIFACT_DESKTOP_TOKEN for the desktop app, or OPENARTIFACT_DEV_TOKEN for local development'
     )
 
 
 def dev_token() -> str | None:
-    """The static bearer token the MCP endpoint accepts, when that is how it authenticates (no Google login).
+    """The static desktop or development bearer credential, when authenticating without Google login.
 
     The web app shows it in its MCP set-up snippets: in development the token is the way in, and the page that
     shows it is already behind the development sign-in that acts as the same user. With Google configured the
@@ -94,7 +99,14 @@ def dev_token() -> str | None:
     """
     if os.environ.get('GOOGLE_CLIENT_ID'):
         return None
-    return os.environ.get('OPENARTIFACT_DEV_TOKEN') or None
+    return desktop_token() or os.environ.get('OPENARTIFACT_DEV_TOKEN') or None
+
+
+def desktop_token() -> str | None:
+    """The private desktop credential; never enabled alongside Google login."""
+    if os.environ.get('GOOGLE_CLIENT_ID'):
+        return None
+    return os.environ.get('OPENARTIFACT_DESKTOP_TOKEN') or None
 
 
 def install_pages() -> None:

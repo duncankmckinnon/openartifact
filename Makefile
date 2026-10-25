@@ -45,6 +45,10 @@ main: format lint test ## Run formatting, linting and tests
 build: ## Bundle the browser runtime to frontend/dist/openartifact.js
 	pnpm -C frontend build
 
+.PHONY: desktop
+desktop: ## Build the native macOS launcher in dist/OpenArtifact.app (requires Docker to run)
+	sh desktop/build.sh
+
 .PHONY: pg-start
 pg-start: ## Run Postgres in Docker on port 5432 (docker-compose.yml; required by `make dev` and `make test`)
 	docker compose up -d --wait postgres

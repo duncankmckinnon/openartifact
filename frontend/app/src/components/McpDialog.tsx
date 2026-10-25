@@ -159,6 +159,23 @@ function Snippet({ text }: { text: string }) {
 function Setup({ mcp }: { mcp: McpInfo }) {
   const [clientId, setClientId] = useState(CLIENTS[0].id)
   const client = CLIENTS.find((c) => c.id === clientId) ?? CLIENTS[0]
+  if (mcp.desktop) {
+    return (
+      <div className="grid gap-3 text-sm text-muted">
+        <p>
+          Connect a local agent at <code className="text-fg">{mcp.url}</code>.
+        </p>
+        <p>
+          Choose Connect an Agent from the OpenArtifact menu bar icon to copy private connection settings for Claude
+          Code or Codex and test the connection.
+        </p>
+        <p>
+          The access credential stays in the native app. Web connectors need a separately hosted server reachable from
+          the internet.
+        </p>
+      </div>
+    )
+  }
   const snippet = client.snippet(mcp)
   return (
     <div className="grid gap-3">
@@ -166,7 +183,7 @@ function Setup({ mcp }: { mcp: McpInfo }) {
         The MCP endpoint is <code className="text-fg">{mcp.url}</code>
         {mcp.auth === 'oauth'
           ? '. Clients sign in with Google the first time; an agent then works as you, on your artifacts.'
-          : '. This server takes its development token, which the snippets include.'}
+          : '. This server takes a private access token, which the snippets include. Keep these snippets private.'}
       </p>
       <div className="flex flex-wrap gap-1.5" role="tablist" aria-label="Client">
         {CLIENTS.map((c) => (

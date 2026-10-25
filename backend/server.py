@@ -42,6 +42,7 @@ import hashlib
 import io
 import json
 import mimetypes
+import os
 import re
 import tempfile
 import tomllib
@@ -61,6 +62,7 @@ from fastapi.staticfiles import StaticFiles
 
 import access
 import api
+import auth
 import build
 import config
 import db
@@ -239,7 +241,10 @@ async def edit_page(artifact_id: str, request: Request) -> Response:
 @app.get('/health/')
 def health() -> dict[str, str]:
     """Liveness probe for the container health check; touches nothing, so it answers while the app is up."""
-    return {'status': 'ok'}
+    result = {'status': 'ok'}
+    if auth.desktop_token():
+        result['desktop_id'] = os.environ.get('OPENARTIFACT_DESKTOP_ID', '')
+    return result
 
 
 @app.get('/openartifact.js')

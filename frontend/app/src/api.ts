@@ -64,6 +64,7 @@ export interface McpInfo {
   url: string
   auth: 'oauth' | 'token'
   token: string | null
+  desktop?: boolean
 }
 
 export interface Configure {

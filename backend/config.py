@@ -48,12 +48,16 @@ def internal_url() -> str:
 
 
 def secret_key() -> bytes:
-    """The server's secret, for signing upload URLs: `OPENARTIFACT_SECRET_KEY`, else the development token.
+    """The server's signing secret: `OPENARTIFACT_SECRET_KEY`, else the desktop or development token.
 
     With Google login the key is required anyway (see `auth.py`); in development the dev token is the one secret
     there is, so it doubles as the key rather than demanding a second variable.
     """
-    key = os.environ.get('OPENARTIFACT_SECRET_KEY') or os.environ.get('OPENARTIFACT_DEV_TOKEN')
+    key = (
+        os.environ.get('OPENARTIFACT_SECRET_KEY')
+        or os.environ.get('OPENARTIFACT_DESKTOP_TOKEN')
+        or os.environ.get('OPENARTIFACT_DEV_TOKEN')
+    )
     if not key:
-        raise RuntimeError('OPENARTIFACT_SECRET_KEY or OPENARTIFACT_DEV_TOKEN is required to sign upload URLs')
+        raise RuntimeError('OPENARTIFACT_SECRET_KEY, OPENARTIFACT_DESKTOP_TOKEN or OPENARTIFACT_DEV_TOKEN is required')
     return key.encode()

@@ -1,0 +1,46 @@
+# A private desktop stack. Never use the development project's volumes or published ports.
+services:
+  app:
+    image: openartifact-desktop-app
+    build: ..
+    environment:
+      DATABASE_URL: postgresql://postgres:postgres@postgres:5432/openartifact
+      OPENARTIFACT_DESKTOP_TOKEN: ${OPENARTIFACT_DESKTOP_TOKEN:?desktop credential required}
+      OPENARTIFACT_DESKTOP_ID: ${OPENARTIFACT_DESKTOP_ID:?desktop identity required}
+      OPENARTIFACT_BASE_URL: http://127.0.0.1:18765
+      OPENARTIFACT_INTERNAL_URL: http://openartifact.internal:8765
+      OPENARTIFACT_CHROME_URL: http://chrome:8766
+    ports:
+      - '127.0.0.1:18765:8765'
+    volumes:
+      - '${OPENARTIFACT_DESKTOP_DATA:?desktop data directory required}/store:/data/store'
+      - cache:/data/cache
+    networks:
+      default:
+        aliases: [openartifact.internal]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      chrome:
+        condition: service_healthy
+  chrome:
+    image: openartifact-desktop-chrome
+    build:
+      context: ..
+      dockerfile: chrome/Dockerfile
+  postgres:
+    image: postgres:18
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: openartifact
+    volumes:
+      - postgres:/var/lib/postgresql
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U postgres']
+      interval: 2s
+      timeout: 2s
+      retries: 15
+volumes:
+  postgres:
+  cache:
