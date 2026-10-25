@@ -121,6 +121,8 @@ def style_files(directory: Path) -> tuple[str, str, dict[str, bytes]]:
     files: dict[str, bytes] = {}
     total = 0
     for raw in sheet.urls:
+        if raw and not raw.startswith('#') and build.is_external(raw):
+            raise build.BuildError('saved styles require local image and font files; download assets before saving')
         path = styles.asset_path(directory, raw)
         if path is None:
             continue

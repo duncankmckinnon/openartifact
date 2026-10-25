@@ -253,7 +253,17 @@ async def test_style_copies_only_appearance_and_namespaces_assets(principal: aut
             assert (directory / match.group('path').split('?')[0].split('#')[0]).is_file()
 
 
-@pytest.mark.parametrize('css', ['@import "other.css";', '.page {background:url(../secret.png)}', '</style>'])
+@pytest.mark.parametrize(
+    'css',
+    [
+        '@import "other.css";',
+        '.page {background:url(../secret.png)}',
+        '</style>',
+        '.page {background:url(https://example.com/logo.png)}',
+        '@font-face {src:url(https://example.com/font.woff2)}',
+        '.page {background:url(/logo.png)}',
+    ],
+)
 async def test_invalid_style_does_not_create_a_library_entry(principal: auth.Principal, css: str):
     with pytest.raises(build.BuildError):
         await presets.create(principal.workspace_id, 'Broken', 'page', css=css, kind='style')

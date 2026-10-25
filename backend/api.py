@@ -23,15 +23,17 @@ from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any, Literal
 
+import attachments
 import presets
+import render
 import styles
 from fastapi import APIRouter, HTTPException, Request, Response
 from fastmcp.exceptions import ToolError
-from pydantic import BaseModel, TypeAdapter
+from pydantic import BaseModel, TypeAdapter, ValidationError
 from pydantic_ai.messages import UserPromptPart
 from pydantic_ai.run import AgentRunResult
 from pydantic_ai.ui.vercel_ai import VercelAIAdapter
-from pydantic_ai.ui.vercel_ai.request_types import StepStartUIPart, UIMessage
+from pydantic_ai.ui.vercel_ai.request_types import FileUIPart, StepStartUIPart, TextUIPart, UIMessage
 from pydantic_ai.ui.vercel_ai.response_types import BaseChunk
 from pydantic_ai.usage import UsageLimits
 
@@ -94,6 +96,8 @@ def artifact_json(
         'org_editable': found.org_editable,
         'forked_from': str(found.forked_from) if found.forked_from else None,
         'preset_kind': found.preset_kind,
+        'draft': found.draft,
+        'version': found.head_sha,
         'created_at': found.created_at.isoformat(),
         'updated_at': found.updated_at.isoformat(),
         'owner_email': owner_email,
@@ -228,7 +232,7 @@ async def create_artifact(body: NewArtifactBody, request: Request) -> dict[str, 
 async def preset_for(preset_id: str, viewer: auth.Principal, kind: presets.Kind | None = None) -> workspace.Artifact:
     """A personal library entry; public visibility never grants access to someone else's library."""
     found = await artifact_for(preset_id, viewer)
-    if found.workspace_id != viewer.workspace_id or found.preset_kind is None:
+    if found.workspace_id != viewer.workspace_id or found.preset_kind is None or found.draft:
         raise HTTPException(404, 'library entry not found')
     if kind and found.preset_kind != kind:
         raise HTTPException(400, f'choose a saved {kind}')
@@ -246,8 +250,31 @@ async def list_presets(request: Request) -> dict[str, object]:
     }
 
 
+@router.get('/artifacts/{artifact_id}')
+async def get_artifact(artifact_id: str, request: Request) -> dict[str, object]:
+    viewer = await viewer_required(request)
+    return artifact_json(await artifact_for(artifact_id, viewer), viewer)
+
+
+@router.get('/presets/{preset_id}/thumbnail')
+async def thumbnail(preset_id: str, request: Request, v: str | None = None) -> Response:
+    viewer = await viewer_required(request)
+    found = await preset_for(preset_id, viewer)
+    if v is not None and v != found.head_sha:
+        raise HTTPException(409, 'artifact changed; reload the library')
+    try:
+        data = await render.thumbnail(found)
+    except build.BuildError as exc:
+        raise HTTPException(422, str(exc).replace(f'{workspace.checkout_path(found.id)}/', '')) from exc
+    except render.RenderError as exc:
+        raise HTTPException(exc.status, str(exc)) from exc
+    return Response(
+        data, media_type='image/png', headers={'Cache-Control': 'private, max-age=86400' if v else 'private, no-cache'}
+    )
+
+
 class PresetBody(BaseModel):
-    """Save a snapshot, or create a template starter or a style from CSS."""
+    """Save a snapshot immediately, or start a template/style draft from optional CSS."""
 
     name: str
     kind: presets.Kind
@@ -259,7 +286,7 @@ class PresetBody(BaseModel):
 
 @router.post('/presets', status_code=201)
 async def save_preset(body: PresetBody, request: Request) -> dict[str, object]:
-    """Save a reusable private entry without changing the source artifact."""
+    """Save an independent snapshot, or create an unlisted private draft when no source is given."""
     mutation(request)
     viewer = await viewer_required(request)
     try:
@@ -269,14 +296,13 @@ async def save_preset(body: PresetBody, request: Request) -> dict[str, object]:
             source = await artifact_for(body.artifact_id, viewer)
             found = await presets.save(source, viewer.workspace_id, body.name, body.kind)
         else:
-            if body.kind == 'style' and body.css is None:
-                raise HTTPException(400, 'provide CSS or choose an existing artifact')
             found = await presets.create(
                 viewer.workspace_id,
                 body.name,
                 'page' if body.kind == 'style' else body.type,
                 kind=body.kind,
                 css=body.css,
+                draft=True,
                 theme=body.theme or agent.DEFAULT_THEMES['page' if body.kind == 'style' else body.type],
             )
     except build.BuildError as exc:
@@ -284,6 +310,49 @@ async def save_preset(body: PresetBody, request: Request) -> dict[str, object]:
     except workspace.ArtifactBusy as exc:
         raise HTTPException(409, str(exc)) from exc
     return artifact_json(found, viewer, viewer.email)
+
+
+async def draft_for(draft_id: str, viewer: auth.Principal) -> workspace.Artifact:
+    found = await artifact_for(draft_id, viewer)
+    if not found.draft or found.workspace_id != viewer.workspace_id:
+        raise HTTPException(404, 'draft not found')
+    return found
+
+
+class DraftName(BaseModel):
+    name: str
+
+
+@router.post('/drafts/{draft_id}/save')
+async def save_draft(draft_id: str, body: DraftName, request: Request) -> dict[str, object]:
+    mutation(request)
+    viewer = await viewer_required(request)
+    found = await draft_for(draft_id, viewer)
+    try:
+        result = await presets.save_draft(found, body.name)
+    except build.BuildError as exc:
+        raise HTTPException(400, str(exc).replace(f'{workspace.checkout_path(found.id)}/', '')) from exc
+    except workspace.ArtifactBusy as exc:
+        raise HTTPException(409, str(exc)) from exc
+    except LookupError as exc:
+        raise HTTPException(404, 'draft not found') from exc
+    return artifact_json(result, viewer)
+
+
+@router.post('/drafts/{draft_id}/discard', status_code=204)
+async def discard_draft(draft_id: str, request: Request) -> Response:
+    mutation(request)
+    viewer = await viewer_required(request)
+    found = await draft_for(draft_id, viewer)
+    try:
+        await presets.discard_draft(found)
+    except build.BuildError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except workspace.ArtifactBusy as exc:
+        raise HTTPException(409, str(exc)) from exc
+    except LookupError as exc:
+        raise HTTPException(404, 'draft not found') from exc
+    return Response(status_code=204)
 
 
 @router.delete('/presets/{preset_id}', status_code=204)
@@ -330,6 +399,8 @@ async def set_access(artifact_id: str, body: AccessBody, request: Request) -> di
     mutation(request)
     viewer = await viewer_required(request)
     found = await artifact_for(artifact_id, viewer, manage=True)
+    if found.draft:
+        raise HTTPException(400, 'save the draft before sharing it')
     if body.placement is None:
         organization_id = found.organization_id
     elif body.placement == 'org':
@@ -483,7 +554,41 @@ async def chat(artifact_id: str, request: Request) -> Response:
     mutation(request)
     viewer = await viewer_required(request)
     found = await artifact_for(artifact_id, viewer, edit=True)
-    adapter = await VercelAIAdapter[agent.ChatDeps, str].from_request(request, agent=agent.agent, sdk_version=7)
+    raw = bytearray()
+    async for chunk in request.stream():
+        if len(raw) + len(chunk) > attachments.MAX_REQUEST_BYTES:
+            raise HTTPException(413, 'chat request exceeds 30 MB')
+        raw.extend(chunk)
+
+    async def receive() -> dict[str, Any]:
+        return {'type': 'http.request', 'body': bytes(raw), 'more_body': False}
+
+    request = Request(request.scope, receive)
+    try:
+        adapter = await VercelAIAdapter[agent.ChatDeps, str].from_request(request, agent=agent.agent, sdk_version=7)
+    except ValidationError as exc:
+        raise HTTPException(400, 'invalid chat message: send one user message with a submit-message trigger') from exc
+    if len(adapter.run_input.messages) != 1 or adapter.run_input.messages[0].role != 'user':
+        raise HTTPException(400, 'send exactly one new user message')
+    last = adapter.run_input.messages[-1]
+    files: dict[str, attachments.Attachment] = {}
+    transient: frozenset[str] = frozenset()
+    if any(isinstance(p, FileUIPart) for p in last.parts):
+        if not found.draft:
+            raise HTTPException(400, 'attach files to a template or style draft; in other chats, paste a link')
+        try:
+            prepared, files = await asyncio.to_thread(attachments.prepare, last)
+        except attachments.AttachmentError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        original_text = {p.text for p in last.parts if isinstance(p, TextUIPart)}
+        transient = frozenset(
+            p.text
+            for p in prepared.parts
+            if isinstance(p, TextUIPart)
+            and p.text not in original_text
+            and not p.text.startswith(('Attached ', 'Embedded image '))
+        )
+        adapter.run_input.messages[-1] = prepared
     extra: dict[str, Any] = adapter.run_input.__pydantic_extra__ or {}
     model_id = extra.get('model')
     # The page the preview shows, so the agent knows what "this slide" means; anything but a positive int is None.
@@ -498,7 +603,11 @@ async def chat(artifact_id: str, request: Request) -> Response:
     name_it = not history and agent.is_untitled(found.title)
 
     async def save(result: AgentRunResult[Any]) -> None:
-        await chats.save(found.id, viewer.user_id, result.all_messages(), chosen)
+        messages = result.all_messages()
+        # The UI adapter appends the incoming prompt to history before Agent.run, so new_messages() excludes it.
+        await chats.save(
+            found.id, viewer.user_id, attachments.strip(messages, transient, start_index=len(history)), chosen
+        )
         if name_it:
             await name_after_first_turn(found, chosen, result)
 
@@ -510,7 +619,7 @@ async def chat(artifact_id: str, request: Request) -> Response:
             async for event in adapter.run_stream(
                 message_history=history,
                 model=agent.resolve_model(chosen),
-                deps=agent.ChatDeps(artifact=found, viewer=viewer, page=page),
+                deps=agent.ChatDeps(artifact=found, viewer=viewer, page=page, files=files),
                 conversation_id=f'{found.id}:{viewer.user_id}',
                 usage_limits=UsageLimits(request_limit=agent.REQUEST_LIMIT),
                 on_complete=save,

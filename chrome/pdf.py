@@ -73,7 +73,7 @@ def print_to_pdf(url: str, pdf_path: Path) -> Printed:
     return run_chrome(url, pdf_path, ['--no-pdf-header-footer', '--print-to-pdf={path}'], 'a PDF')
 
 
-def screenshot(url: str, png_path: Path, width: int, height: int, scale: int = 1) -> Printed:
+def screenshot(url: str, png_path: Path, width: int, height: int, scale: float = 1) -> Printed:
     """Capture the page at `url` as a PNG of `width` x `height` CSS pixels, as a viewer with that window sees it.
 
     `scale` is the device pixel ratio: 2 gives a PNG of twice the size showing the same window, for a picture that
@@ -83,7 +83,7 @@ def screenshot(url: str, png_path: Path, width: int, height: int, scale: int = 1
     """
     flags = ['--hide-scrollbars', f'--window-size={width},{height}']
     if scale != 1:
-        flags.append(f'--force-device-scale-factor={scale}')
+        flags.append(f'--force-device-scale-factor={scale:g}')
     return run_chrome(url, png_path, [*flags, '--screenshot={path}'], 'a screenshot')
 
 

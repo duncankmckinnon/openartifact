@@ -27,6 +27,7 @@ class What:
     visibility: str
     org_editable: bool
     organization_id: uuid.UUID | None
+    draft: bool = False
 
 
 OWNER = Who(uuid.uuid4(), OWNER_WS, frozenset({ORG}))

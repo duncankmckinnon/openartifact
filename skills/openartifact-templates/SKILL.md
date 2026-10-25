@@ -5,11 +5,14 @@ description: Use when creating or refining a reusable OpenArtifact template from
 
 # Reusable template authoring
 
+For files and links, follow [Working from visual references](references/deconstructing.md), also served as
+`skill://openartifact-templates/references/deconstructing.md`.
+
 Create a working starting point the user can reuse. Its markdown, configuration, components, CSS and assets
 form the template. The user describes and refines it beside the live preview.
 
-In OpenArtifact's template editor, work on the current artifact: it is already saved in the user's library.
-For external MCP clients, `new_template` starts one, `save_preset(..., kind="template")` snapshots an artifact,
+In OpenArtifact's template editor, work on the current artifact: it is an unsaved draft that the user keeps by pressing Save; never say it is saved.
+For external MCP clients, `new_template` and `new_style` start drafts and `save_draft` keeps one when the user says so. `save_preset(..., kind="template")` snapshots an artifact,
 and `list_presets` and `new_from_template` find and reuse them. Copies retain their type and independent files.
 
 ## Clarify and preserve the brief

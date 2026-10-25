@@ -35,6 +35,14 @@ Fonts:
 
 Document and page types add `--document-width` / `--document-padding` (sheet size, default A4 with 20mm padding) and `--page-max-width` (column cap, default 52rem). To print a document on US paper, add `@page { size: letter; }`.
 
+## Sizes per form factor
+
+Use type-scoped selectors to set sizes and line heights independently:
+`.deck .page h1`, `.artifact-document .prose h1` and `.artifact-page .prose h1`.
+Use `.page.cover h1` for cover titles and scope it to a type when its size differs. Apply the same pattern to
+headings, paragraphs, small text and code. Styles replace the target stylesheet, so include every rule needed
+for the supported form factors. The style guide measures these selectors on rendered specimen pages.
+
 ## Code colours
 
 Token colours in code blocks derive from the accent variables (`--accent`, `--accent-secondary`, `--accent-tertiary`, `--accent-aqua`, `--color-muted`) and are deepened automatically on light slides, so a brand palette restyles code too. To tune them directly, override `--code-keyword`, `--code-string`, `--code-number`, `--code-title`, `--code-attr`, `--code-comment` or `--code-meta` on `.slide`.

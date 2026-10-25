@@ -42,6 +42,8 @@ class Shared(Protocol):
     def org_editable(self) -> bool: ...
     @property
     def organization_id(self) -> uuid.UUID | None: ...
+    @property
+    def draft(self) -> bool: ...
 
 
 def is_owner(artifact: Shared, viewer: Viewer | None) -> bool:
@@ -56,6 +58,8 @@ def in_org(artifact: Shared, viewer: Viewer | None) -> bool:
 
 def can_view(artifact: Shared, viewer: Viewer | None) -> bool:
     """See the page, its sources and exports."""
+    if artifact.draft:
+        return is_owner(artifact, viewer)
     if artifact.visibility == 'public' or is_owner(artifact, viewer):
         return True
     return artifact.visibility == 'org' and in_org(artifact, viewer)
@@ -63,12 +67,12 @@ def can_view(artifact: Shared, viewer: Viewer | None) -> bool:
 
 def can_edit(artifact: Shared, viewer: Viewer | None) -> bool:
     """Change the files: the owner, or the organisation when the artifact is editable by it."""
-    return is_owner(artifact, viewer) or (artifact.org_editable and in_org(artifact, viewer))
+    return is_owner(artifact, viewer) or (not artifact.draft and artifact.org_editable and in_org(artifact, viewer))
 
 
 def can_fork(artifact: Shared, viewer: Viewer | None) -> bool:
     """Copy the artifact into one's own space: anyone signed in who can see it."""
-    return viewer is not None and can_view(artifact, viewer)
+    return not artifact.draft and viewer is not None and can_view(artifact, viewer)
 
 
 def can_manage(artifact: Shared, viewer: Viewer | None) -> bool:

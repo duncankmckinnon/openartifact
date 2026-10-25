@@ -32,7 +32,10 @@ Tools
   description. The web editor loads this skill automatically when chatting about a template.
 - save_preset(artifact, name, kind): save an independent private template or style snapshot. A template copies
   current source files; a style retains only CSS, its local images/fonts, and the base theme.
-- new_style(title, css, theme): save pasted CSS as a reusable private style with a preview page.
+- new_style(title, css, theme): start an unsaved style draft from optional CSS. new_template also starts a draft.
+- save_draft(artifact, name): keep a draft only when the user asks to save it. Unsaved drafts expire a day after their last change.
+- add_font(artifact, family, weights, italic): install local Google Fonts files and return CSS rules to add to styles.css.
+  External clients read references with their own tools and upload deliberately kept images with upload_url.
 - new_from_template(template, title, content, style, public=False): create an independent personal artifact,
   optionally replacing its markdown or applying a saved style. Omit content to keep the starter content.
 - apply_style(artifact, style): replace appearance on an editable artifact while keeping content and layout.

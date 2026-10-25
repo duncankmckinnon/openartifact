@@ -39,6 +39,7 @@ from pathlib import Path
 from typing import Any, Literal, get_args
 from urllib.parse import quote
 
+import fonts
 import presets
 import render
 import styles as css_styles
@@ -346,6 +347,8 @@ async def set_access(artifact: str, public: bool, org_editable: bool = False) ->
         org_editable: Whether everyone in its organisation may edit it (organisation artifacts only).
     """
     found = await resolve(artifact)
+    if found.draft:
+        raise ToolError('save the draft before sharing it')
     principal = await auth.current_principal()
     if not access.can_manage(found, principal):
         raise ToolError(f'artifact {artifact} is not yours; only its owner can change who may see it')
@@ -457,6 +460,8 @@ async def build_artifact(artifact: str) -> str:
 async def screenshot(artifact: str, page: int = 1) -> Image:
     """See one page of an artifact as a viewer sees it: a PNG of the built page, 1-based.
 
+    For a style, pages 1, 2 and 3 show its deck, document and page guide.
+
     For a deck this is the slide itself at 16:9; for a document or page artifact the window scrolled to that
     page. Use it to check layout after a build, or when the user talks about how something looks. The page is
     built first if needed, so a broken artifact fails as a build error.
@@ -534,6 +539,8 @@ async def resolve_preset(value: str, kind: presets.Kind | None = None) -> worksp
     found = await workspace.get_artifact_in(principal.workspace_id, parse_artifact_id(value))
     if found is None or found.preset_kind is None:
         raise ToolError('library entry not found; use `list_presets`')
+    if found.draft:
+        raise ToolError('this is an unsaved draft; save it with `save_draft` first')
     if kind and found.preset_kind != kind:
         raise ToolError(f'choose a saved {kind} from `list_presets`')
     return found
@@ -581,7 +588,7 @@ async def save_preset(artifact: str, name: str, kind: presets.Kind) -> str:
 
 
 async def new_template(title: str, type: ArtifactType = 'deck', theme: Theme | None = None) -> str:
-    """Create a private template starter to build from a description with the template-authoring skill.
+    """Start an unsaved private template draft to build with the template-authoring skill.
 
     Read `skill://openartifact-templates/SKILL.md`, edit the returned artifact with `run_code`, and build it.
     The web editor automatically loads that skill for this template's chat.
@@ -596,13 +603,29 @@ async def new_template(title: str, type: ArtifactType = 'deck', theme: Theme | N
     principal = await auth.current_principal()
     async with preset_errors():
         found = await presets.create(
-            principal.workspace_id, title, type, kind='template', theme=theme or agent.DEFAULT_THEMES[type]
+            principal.workspace_id, title, type, kind='template', theme=theme or agent.DEFAULT_THEMES[type], draft=True
         )
-    return await created(found.id, True)
+    return await created(found.id, True) + DRAFT_REPLY
 
 
-async def new_style(title: str, css: str, theme: Theme = 'light') -> str:
-    """Save CSS and a base theme as a private reusable style, with a preview page.
+DRAFT_REPLY = (
+    'This is an unsaved draft. Build it with the user and call `save_draft` only when they say to save it; '
+    'an unsaved draft is deleted a day after its last change.\n'
+)
+
+
+async def save_draft(artifact: str, name: str | None = None) -> str:
+    """Keep a library draft only when the user asks to save it."""
+    found = await resolve(artifact, edit=True)
+    if not found.draft:
+        raise ToolError('not a draft: drafts come from new_template and new_style')
+    async with preset_errors():
+        result = await presets.save_draft(found, name if name is not None else found.title)
+    return await created(result.id, True)
+
+
+async def new_style(title: str, css: str | None = None, theme: Theme = 'light') -> str:
+    """Start an unsaved private style draft from optional CSS and a base theme.
 
     Local image/font references must already exist: save an existing artifact's style with `save_preset`
     to include its assets. CSS imports must be combined into a single stylesheet first.
@@ -614,8 +637,28 @@ async def new_style(title: str, css: str, theme: Theme = 'light') -> str:
     """
     principal = await auth.current_principal()
     async with preset_errors():
-        found = await presets.create(principal.workspace_id, title, 'page', kind='style', css=css, theme=theme)
-    return await created(found.id, True)
+        found = await presets.create(
+            principal.workspace_id, title, 'page', kind='style', css=css, theme=theme, draft=True
+        )
+    return await created(found.id, True) + DRAFT_REPLY
+
+
+async def add_font(artifact: str, family: str, weights: list[int] | None = None, italic: bool = False) -> str:
+    """Install a free Google Fonts family locally; returns @font-face rules to add to styles.css."""
+    found = await resolve(artifact, edit=True)
+    try:
+        files = await fonts.fetch_family(family, weights if weights is not None else [400, 700], italic)
+    except fonts.FontError as exc:
+        raise ToolError(str(exc)) from exc
+    async with editing(found.id, f'add font: {family}') as tx:
+        for file in files:
+            target = presets.contained(tx.path, tx.path / file.path)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            await asyncio.to_thread(target.write_bytes, file.data)
+    return (
+        fonts.font_face_css(family, files)
+        + '\nPut these rules in styles.css and set --font-heading, --font-body or --font-mono to the family with a generic fallback.\n'
+    )
 
 
 async def new_from_template(
@@ -686,7 +729,17 @@ mcp.tool(upload_url)
 mcp.tool(set_access)
 mcp.tool(fork)
 mcp.tool(list_artifacts)
-for tool in (list_presets, save_preset, new_template, new_style, new_from_template, apply_style, remove_preset):
+for tool in (
+    list_presets,
+    save_preset,
+    new_template,
+    new_style,
+    save_draft,
+    add_font,
+    new_from_template,
+    apply_style,
+    remove_preset,
+):
     mcp.tool(tool)
 mcp.add_provider(SkillProvider(SKILL_DIR))
 mcp.add_provider(SkillProvider(TEMPLATE_SKILL_DIR))

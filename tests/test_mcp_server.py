@@ -79,6 +79,11 @@ async def head_sha(artifact: str) -> str | None:
 async def test_template_and_style_library_tools(me: auth.Principal):
     template = artifact_id(await mcp_server.new_template('Weekly report', type='document'))
     style = artifact_id(await mcp_server.new_style('Blue', ':root {--accent: blue}'))
+    assert template not in await mcp_server.list_presets()
+    with pytest.raises(ToolError, match='save_draft'):
+        await mcp_server.new_from_template(template)
+    await mcp_server.save_draft(template)
+    await mcp_server.save_draft(style)
     listing = await mcp_server.list_presets()
     assert template in listing and style in listing
     copy = artifact_id(await mcp_server.new_from_template(template, title='Week 1', style=style))
@@ -92,6 +97,24 @@ async def test_template_and_style_library_tools(me: auth.Principal):
         await mcp_server.new_from_template(style)
     with pytest.raises(ToolError):
         await mcp_server.new_style('Bad', '@import "missing.css";')
+
+
+async def test_add_font_installs_assets_and_returns_buildable_css(
+    me: auth.Principal, demo: str, monkeypatch: pytest.MonkeyPatch
+):
+    import fonts
+
+    async def family(name: str, weights: list[int], italic: bool) -> list[fonts.FontFile]:
+        assert name == 'Inter' and weights == [400, 700]
+        return [fonts.FontFile('fonts/inter-400-latin.woff2', 400, 'normal', 'U+0-FF', b'wOF2fixture')]
+
+    monkeypatch.setattr(fonts, 'fetch_family', family)
+    result = await mcp_server.add_font(demo, 'Inter')
+    css = result.partition('\nPut these rules')[0]
+    async with workspace.edit(uuid.UUID(demo), 'use installed font') as tx:
+        (tx.path / 'styles.css').write_text(css + '\n:root { --font-body: Inter, sans-serif }')
+    assert 'page:' in await mcp_server.build_artifact(demo)
+    assert (files_of(me, demo) / 'fonts/inter-400-latin.woff2').read_bytes() == b'wOF2fixture'
 
 
 # --- new_artifact ----------------------------------------------------------
@@ -451,6 +474,8 @@ async def test_tools_over_mcp(me: auth.Principal, pool: None):
             'new_from_template',
             'apply_style',
             'remove_preset',
+            'save_draft',
+            'add_font',
         }
         # The Google-style docstrings are split: the lead is the description, `Args:` entries describe parameters.
         description = tools['new_personal_artifact'].description or ''
