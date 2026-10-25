@@ -3,8 +3,8 @@ set -eu
 ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 APP="$ROOT/dist/OpenArtifact.app"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources" "$ROOT/tmp/swift-cache"
-swiftc "$ROOT/desktop/main.swift" -o "$APP/Contents/MacOS/OpenArtifact" \
-    -module-cache-path "$ROOT/tmp/swift-cache" -framework AppKit -framework WebKit
+swiftc -swift-version 5 -target "$(uname -m)-apple-macosx12.0" "$ROOT"/desktop/*.swift -o "$APP/Contents/MacOS/OpenArtifact" \
+    -module-cache-path "$ROOT/tmp/swift-cache" -framework AppKit -framework WebKit -framework Security
 printf '%s\n' "$ROOT" > "$APP/Contents/Resources/checkout.txt"
 cat > "$APP/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>

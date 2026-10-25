@@ -127,7 +127,7 @@ export function ArtifactList() {
   const [me, setMe] = useState<Me | null>(null)
   const [listing, setListing] = useState<Listing | null>(null)
   const [error, setError] = useState<string | null>(null)
-  const [mcpOpen, setMcpOpen] = useState(false)
+  const [mcpOpen, setMcpOpen] = useState(() => new URLSearchParams(window.location.search).get('connect') === 'mcp')
   const [presets, setPresets] = useState<Presets>({ templates: [], styles: [] })
   const refreshLibrary = async () => {
     const [entries, artifacts] = await Promise.all([api.presets(), api.artifacts()])

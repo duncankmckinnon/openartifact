@@ -132,8 +132,15 @@ async def configure(request: Request) -> dict[str, object]:
     """
     await viewer_required(request)
     token = auth.dev_token()
+    mcp: dict[str, object] = {
+        'url': f'{config.base_url()}/mcp/',
+        'auth': 'oauth' if token is None else 'token',
+        'token': None if auth.desktop_token() else token,
+    }
+    if auth.desktop_token():
+        mcp['desktop'] = True
     return {
-        'mcp': {'url': f'{config.base_url()}/mcp/', 'auth': 'oauth' if token is None else 'token', 'token': token},
+        'mcp': mcp,
         'models': [{'id': m.id, 'name': m.name} for m in agent.configured_models()],
         'default': agent.default_model(),
     }

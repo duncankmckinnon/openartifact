@@ -62,7 +62,7 @@ def google_config() -> tuple[str, str] | None:
 
 def dev_login_enabled() -> bool:
     """The development sign-in exists only where Google is not configured and the dev token is."""
-    return google_config() is None and bool(os.environ.get('OPENARTIFACT_DEV_TOKEN'))
+    return google_config() is None and not auth.desktop_token() and bool(os.environ.get('OPENARTIFACT_DEV_TOKEN'))
 
 
 def google_client() -> httpx2.AsyncClient:
@@ -291,5 +291,32 @@ async def login_dev(request: Request) -> Response:
             conn, sub=auth.DEV_SUB, email=email, name=auth.DEV_CLAIMS['name'], picture=None, hd=hd
         )
     response = RedirectResponse(safe_next(str(form.get('next', '/'))), status_code=303)
+    await sign_in(response, principal)
+    return response
+
+
+@router.post('/login/desktop')
+async def login_desktop(request: Request) -> Response:
+    """Exchange the app's private bearer credential for a normal browser session.
+
+    The native app sends the token in a header, never a URL or injected script. Browser and MCP tools resolve
+    to the same local identity. Hosted and development servers do not expose this sign-in.
+    """
+    token = auth.desktop_token()
+    if token is None:
+        raise HTTPException(404, 'desktop sign-in is not available')
+    if not same_origin(request):
+        raise HTTPException(403, 'cross-site request')
+    if not secrets.compare_digest(request.headers.get('authorization', '').encode(), f'Bearer {token}'.encode()):
+        raise HTTPException(401, 'invalid desktop credential')
+    async with db.pool().acquire() as conn, conn.transaction():
+        principal = await auth.upsert_user(
+            conn,
+            sub=auth.DESKTOP_CLAIMS['sub'],
+            email=auth.DESKTOP_CLAIMS['email'],
+            name=auth.DESKTOP_CLAIMS['name'],
+            picture=None,
+        )
+    response = Response(status_code=204, headers={'cache-control': 'no-store'})
     await sign_in(response, principal)
     return response

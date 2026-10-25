@@ -86,5 +86,7 @@ def test_secret_key_prefers_the_secret_over_the_dev_token(monkeypatch: pytest.Mo
         upload.verify_token(with_dev_token, ARTIFACT, 'main.md', 10, now=0)
     monkeypatch.delenv('OPENARTIFACT_SECRET_KEY')
     monkeypatch.delenv('OPENARTIFACT_DEV_TOKEN')
-    with pytest.raises(RuntimeError, match='OPENARTIFACT_SECRET_KEY or OPENARTIFACT_DEV_TOKEN is required'):
+    with pytest.raises(
+        RuntimeError, match='OPENARTIFACT_SECRET_KEY, OPENARTIFACT_DESKTOP_TOKEN or OPENARTIFACT_DEV_TOKEN is required'
+    ):
         upload.make_token(ARTIFACT, 'main.md', 10, expires=1_000)
