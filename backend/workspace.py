@@ -22,6 +22,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import logging
 import os
 import re
 import shutil
@@ -41,6 +42,7 @@ from config import cache_dir
 # Build output is never committed; the exclude lives in the repository so the tree carries no git files.
 EXCLUDE = 'dist/\n'
 GIT_TIMEOUT = 60.0
+logger = logging.getLogger(__name__)
 # A fixed environment so git ignores the host user's config and never prompts. Commits are authored by the bot;
 # when users have identities on the repo (the GitHub backend) the author can become the user.
 GIT_ENV = {
@@ -83,6 +85,7 @@ class Artifact:
     created_at: datetime
     updated_at: datetime
     preset_kind: str | None = None
+    draft: bool = False
 
     @classmethod
     def from_row(cls, row: asyncpg.Record) -> Artifact:
@@ -99,6 +102,7 @@ class Artifact:
             created_at=row['created_at'],
             updated_at=row['updated_at'],
             preset_kind=row['preset_kind'],
+            draft=row['draft'],
         )
 
 
@@ -115,6 +119,7 @@ ARTIFACT_FIELDS = (
     'created_at',
     'updated_at',
     'preset_kind',
+    'draft',
 )
 ARTIFACT_COLUMNS = ', '.join(ARTIFACT_FIELDS)
 
@@ -136,6 +141,7 @@ class NewArtifact:
     organization_id: uuid.UUID | None = None
     forked_from: uuid.UUID | None = None
     preset_kind: str | None = None
+    draft: bool = False
 
 
 @dataclass(frozen=True)
@@ -363,7 +369,8 @@ async def edit(artifact_id: uuid.UUID, message: str, *, create: NewArtifact | No
         if create is not None:
             row = await conn.fetchrow(
                 'INSERT INTO artifacts (id, workspace_id, title, type, visibility, org_editable, organization_id, '
-                f'forked_from, preset_kind) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING {ARTIFACT_COLUMNS}',
+                'forked_from, preset_kind, draft) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) '
+                f'RETURNING {ARTIFACT_COLUMNS}',
                 artifact_id,
                 create.workspace_id,
                 create.title,
@@ -373,6 +380,7 @@ async def edit(artifact_id: uuid.UUID, message: str, *, create: NewArtifact | No
                 create.organization_id,
                 create.forked_from,
                 create.preset_kind,
+                create.draft,
             )
         else:
             try:
@@ -406,8 +414,74 @@ async def edit(artifact_id: uuid.UUID, message: str, *, create: NewArtifact | No
 async def open_artifact(artifact: Artifact) -> AsyncGenerator[Path]:
     """Read-only access to an artifact's tree, synced to the current head and locked for the block."""
     async with artifact_lock(artifact.id):
-        head_sha: str | None = await db.pool().fetchval('SELECT head_sha FROM artifacts WHERE id = $1', artifact.id)
-        yield await sync_checkout(artifact.id, head_sha)
+        row = await db.pool().fetchrow('SELECT head_sha FROM artifacts WHERE id = $1', artifact.id)
+        if row is None:
+            raise LookupError(f'artifact {artifact.id} does not exist')
+        yield await sync_checkout(artifact.id, row['head_sha'])
+
+
+async def cleanup_artifact(artifact_id: uuid.UUID) -> None:
+    """Finish durable deletion work, serialized across processes and safe to retry after partial cleanup."""
+    async with artifact_lock(artifact_id), db.pool().acquire() as conn, conn.transaction():
+        await conn.execute("SET LOCAL lock_timeout = '60s'")
+        pending = await conn.fetchrow(
+            'SELECT artifact_id FROM artifact_deletions WHERE artifact_id = $1 FOR UPDATE', artifact_id
+        )
+        if pending is None:
+            return
+        for key in await store.store().list(f'artifacts/{artifact_id}/'):
+            try:
+                await store.store().delete(key)
+            except FileNotFoundError:
+                pass
+        directory = cache_dir() / str(artifact_id)
+        if directory.exists():
+            await asyncio.to_thread(shutil.rmtree, directory)
+        _synced.pop(artifact_id, None)
+        await conn.execute('DELETE FROM artifact_deletions WHERE artifact_id = $1', artifact_id)
+
+
+async def retry_artifact_cleanup() -> None:
+    """Attempt every pending cleanup without losing work when a store or filesystem is unavailable."""
+    rows = await db.pool().fetch('SELECT artifact_id FROM artifact_deletions ORDER BY created_at, artifact_id')
+    for row in rows:
+        try:
+            await cleanup_artifact(row['artifact_id'])
+        except Exception:
+            logger.exception('cleanup of artifact %s failed; will retry', row['artifact_id'])
+
+
+async def delete_artifact(
+    artifact_id: uuid.UUID,
+    *,
+    draft_workspace_id: uuid.UUID | None = None,
+    expired_before: datetime | None = None,
+) -> bool:
+    """Delete the locked row and queue cleanup, rechecking draft ownership/expiry when requested.
+
+    Return false when a conditional deletion is no longer eligible. External cleanup failures are logged
+    and retained in `artifact_deletions`, so a successful logical deletion never depends on store uptime.
+    """
+    async with artifact_lock(artifact_id), db.pool().acquire() as conn, conn.transaction():
+        await conn.execute("SET LOCAL lock_timeout = '60s'")
+        try:
+            row = await conn.fetchrow(f'SELECT {ARTIFACT_COLUMNS} FROM artifacts WHERE id = $1 FOR UPDATE', artifact_id)
+        except asyncpg.LockNotAvailableError as exc:
+            raise ArtifactBusy(f'artifact {artifact_id} is busy, try again') from exc
+        if row is None:
+            raise LookupError(f'artifact {artifact_id} does not exist')
+        found = Artifact.from_row(row)
+        if draft_workspace_id is not None and (not found.draft or found.workspace_id != draft_workspace_id):
+            return False
+        if expired_before is not None and (not found.draft or found.updated_at >= expired_before):
+            return False
+        await conn.execute('INSERT INTO artifact_deletions (artifact_id) VALUES ($1)', artifact_id)
+        await conn.execute('DELETE FROM artifacts WHERE id = $1', artifact_id)
+    try:
+        await cleanup_artifact(artifact_id)
+    except Exception:
+        logger.exception('cleanup of artifact %s failed; will retry', artifact_id)
+    return True
 
 
 async def clone_repository(artifact_id: uuid.UUID, dest: Path) -> None:
@@ -440,9 +514,10 @@ async def get_artifact_in(workspace_id: uuid.UUID, artifact_id: uuid.UUID) -> Ar
 
 
 async def list_artifacts(workspace_id: uuid.UUID) -> list[Artifact]:
-    """Every artifact in a workspace, oldest first."""
+    """Every saved artifact in a workspace, oldest first."""
     rows = await db.pool().fetch(
-        f'SELECT {ARTIFACT_COLUMNS} FROM artifacts WHERE workspace_id = $1 ORDER BY created_at, id', workspace_id
+        f'SELECT {ARTIFACT_COLUMNS} FROM artifacts WHERE workspace_id = $1 AND NOT draft ORDER BY created_at, id',
+        workspace_id,
     )
     return [Artifact.from_row(row) for row in rows]
 
@@ -456,7 +531,7 @@ async def list_shared_artifacts(
         f'SELECT {artifact_columns("a")}, u.email AS owner_email FROM artifacts a '
         'JOIN workspaces w ON w.id = a.workspace_id JOIN users u ON u.id = w.owner_user_id '
         "WHERE a.organization_id = ANY($1::uuid[]) AND a.visibility IN ('org', 'public') AND a.workspace_id <> $2 "
-        'ORDER BY a.created_at, a.id',
+        'AND NOT a.draft ORDER BY a.created_at, a.id',
         list(org_ids),
         exclude_workspace,
     )

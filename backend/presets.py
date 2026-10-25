@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import re
 import tomllib
 import uuid
-from datetime import date, datetime, time
+from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
 from typing import Literal, cast
 from urllib.parse import quote, unquote, urlsplit
@@ -20,6 +21,9 @@ import db
 import workspace
 
 Kind = Literal['template', 'style']
+DRAFT_TTL = timedelta(hours=24)
+SWEEP_INTERVAL = 3600.0
+logger = logging.getLogger(__name__)
 STYLE_PREVIEW = '# Your style\n\nA reusable visual style.\n\n## A heading\n\nText with **bold**, *italic*, and a [link](#).\n\n- First item\n- Second item\n'
 
 
@@ -214,7 +218,14 @@ async def save(source: workspace.Artifact, workspace_id: uuid.UUID, name: str, k
 
 
 async def create(
-    workspace_id: uuid.UUID, name: str, type: str, *, kind: Kind, css: str | None = None, theme: str = 'light'
+    workspace_id: uuid.UUID,
+    name: str,
+    type: str,
+    *,
+    kind: Kind,
+    css: str | None = None,
+    theme: str = 'light',
+    draft: bool = False,
 ) -> workspace.Artifact:
     """Create a private starter template or a style from pasted CSS."""
     # Import here: agent's defaults depend on the MCP module, which also calls these helpers.
@@ -222,7 +233,7 @@ async def create(
 
     name = name_of(name)
     artifact_id = uuid.uuid4()
-    create = workspace.NewArtifact(workspace_id, name, type, preset_kind=kind)
+    create = workspace.NewArtifact(workspace_id, name, type, preset_kind=kind, draft=draft)
     async with workspace.edit(artifact_id, f'new {kind}: {name}', create=create) as tx:
         configure(tx.path, title=name, type=type, theme=theme)
         (tx.path / 'main.md').write_text(
@@ -235,6 +246,59 @@ async def create(
             build.build_html, tx.path, markdown_url=f'../{artifact_id}.md', css_validator=styles.validate
         )
     return await saved(artifact_id)
+
+
+async def save_draft(draft: workspace.Artifact, name: str) -> workspace.Artifact:
+    """Validate the final source, rename and publish a library draft in one edit transaction."""
+    name = name_of(name)
+    async with workspace.edit(draft.id, f'save draft: {name}') as tx:
+        if (
+            not tx.artifact.draft
+            or tx.artifact.workspace_id != draft.workspace_id
+            or tx.artifact.preset_kind not in ('template', 'style')
+        ):
+            raise build.BuildError('not an owned library draft')
+        configure(tx.path, title=name)
+        await asyncio.to_thread(build.build_page_data, configuration(tx.path), css_validator=styles.validate)
+        if tx.artifact.preset_kind == 'style':
+            await asyncio.to_thread(style_files, tx.path)
+        await tx.conn.execute(
+            'UPDATE artifacts SET title = $2, draft = false, updated_at = now() WHERE id = $1', draft.id, name
+        )
+    return await saved(draft.id)
+
+
+async def discard_draft(draft: workspace.Artifact) -> None:
+    """Discard only a row that is still a draft in the expected workspace."""
+    if not await workspace.delete_artifact(draft.id, draft_workspace_id=draft.workspace_id):
+        raise build.BuildError('not an owned library draft')
+
+
+async def sweep_drafts() -> int:
+    """Remove idle drafts, rechecking expiry after locking, and retry durable external cleanup."""
+    await workspace.retry_artifact_cleanup()
+    cutoff = datetime.now(UTC) - DRAFT_TTL
+    rows = await db.pool().fetch('SELECT id FROM artifacts WHERE draft AND updated_at < $1', cutoff)
+    deleted = 0
+    for row in rows:
+        try:
+            deleted += await workspace.delete_artifact(row['id'], expired_before=cutoff)
+        except LookupError:
+            # Another worker already discarded this candidate.
+            continue
+        except Exception:
+            logger.exception('sweep of draft %s failed; will retry', row['id'])
+    return deleted
+
+
+async def sweep_drafts_forever() -> None:
+    """Run at startup and hourly; cancellation propagates during shutdown."""
+    while True:
+        try:
+            await sweep_drafts()
+        except Exception:
+            logger.exception('draft sweep failed; will retry')
+        await asyncio.sleep(SWEEP_INTERVAL)
 
 
 async def instantiate(
