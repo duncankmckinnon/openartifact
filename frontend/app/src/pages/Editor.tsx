@@ -25,13 +25,14 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import type { DeckController, DeckPosition } from '../../../src/deck.ts'
 import { type AccessChoice, type Artifact, accessFields, accessOf, api, findArtifact, type Me } from '../api.ts'
 import { Chat } from '../chat/Chat.tsx'
+import { DraftBar } from '../components/DraftBar.tsx'
 import { Header } from '../components/Header.tsx'
 import { ArtifactLibrary } from '../components/Library.tsx'
 import { McpDialog } from '../components/McpDialog.tsx'
-import { Badge, Button, LinkButton, Select, Spinner } from '../components/ui.tsx'
+import { Badge, Button, Dialog, LinkButton, Select, Spinner } from '../components/ui.tsx'
 import { type EditMode, MarkdownEditor } from '../editor/MarkdownEditor.tsx'
 import { Preview } from '../Preview.tsx'
-import { navigate } from '../router.ts'
+import { navigate, setNavigationGuard } from '../router.ts'
 
 /** The owner's control over who sees the artifact: the two personal choices, or all five when they are in an
  * organisation, since an artifact can move between their own space and the organisation's. */
@@ -254,6 +255,7 @@ function Workbench({
   version,
   reload,
   page,
+  onDirtyChange,
 }: {
   artifact: Artifact
   /** Bumped to reload the preview; `reload` bumps it and refetches the artifact. */
@@ -261,10 +263,14 @@ function Workbench({
   reload: () => void
   /** The page the preview shows, 1-based, as the runtime inside it reports. */
   page: number | null
+  onDirtyChange: (dirty: boolean) => void
 }) {
   const [mode, setMode] = useState<Mode>('view')
   const [deck, setDeck] = useState<DeckController | null>(null)
   const state = useSource(artifact, mode, version, reload)
+  useEffect(() => {
+    onDirtyChange(state.dirty)
+  }, [state.dirty, onDirtyChange])
   const editing = mode !== 'view'
   const status = state.dirty ? 'Unsaved changes to main.md' : editing ? 'Editing main.md' : null
   return (
@@ -272,14 +278,14 @@ function Workbench({
       <aside className="flex h-[45vh] w-full shrink-0 flex-col border-b border-line bg-panel md:h-auto md:w-[420px] md:border-r md:border-b-0">
         <Chat
           artifactId={artifact.id}
-          isTemplate={artifact.preset_kind === 'template'}
+          draftKind={artifact.draft ? artifact.preset_kind : null}
           page={page}
           onChanged={reload}
         />
       </aside>
       <main className="flex min-h-0 flex-1 flex-col">
         <div className="flex h-10 shrink-0 items-center gap-3 border-b border-line bg-panel px-3">
-          <ModeToggle mode={mode} onChange={setMode} />
+          {artifact.preset_kind !== 'style' ? <ModeToggle mode={mode} onChange={setMode} /> : null}
           <Button onClick={reload} className="h-7 px-2" title="Reload the preview" disabled={editing}>
             <RefreshCw size={14} />
           </Button>
@@ -310,7 +316,13 @@ function Workbench({
         ) : null}
         <div className="min-h-0 flex-1">
           {!editing ? (
-            <Preview artifactId={artifact.id} version={version} page={page} onDeck={setDeck} />
+            <Preview
+              artifactId={artifact.id}
+              version={version}
+              page={page}
+              onDeck={setDeck}
+              guide={artifact.preset_kind === 'style'}
+            />
           ) : state.source === null ? (
             <div className="p-4">
               <Spinner label="Loading main.md" />
@@ -338,6 +350,41 @@ export function Editor({ id }: { id: string }) {
   const [artifact, setArtifact] = useState<Artifact | null | undefined>(undefined)
   const [version, setVersion] = useState(1)
   const [promptOpen, setPromptOpen] = useState(false)
+  const [sourceDirty, setSourceDirty] = useState(false)
+  const [leaveTo, setLeaveTo] = useState<string | null>(null)
+  const [leaving, setLeaving] = useState(false)
+  const [leaveError, setLeaveError] = useState<string | null>(null)
+  useEffect(() => {
+    if (!artifact?.draft) return
+    const warn = (event: BeforeUnloadEvent) => event.preventDefault()
+    window.addEventListener('beforeunload', warn)
+    setNavigationGuard((to) => {
+      setLeaveTo(to)
+      setLeaveError(null)
+      return false
+    })
+    return () => {
+      window.removeEventListener('beforeunload', warn)
+      setNavigationGuard(null)
+    }
+  }, [artifact?.draft])
+  const discarded = () => {
+    setNavigationGuard(null)
+    navigate('/')
+  }
+  const discardAndLeave = async () => {
+    if (!artifact || !leaveTo) return
+    setLeaving(true)
+    try {
+      await api.discardDraft(artifact.id)
+      setNavigationGuard(null)
+      navigate(leaveTo)
+    } catch (error) {
+      setLeaveError(error instanceof Error ? error.message : String(error))
+    } finally {
+      setLeaving(false)
+    }
+  }
   // After a turn the artifact may have changed beyond its page: the first turn names it.
   const reload = useCallback(() => {
     setVersion((v) => v + 1)
@@ -409,9 +456,22 @@ export function Editor({ id }: { id: string }) {
           orgEditable={artifact.org_editable}
           domain={artifact.visibility === 'org' ? domain : null}
         />
-        {artifact.can_manage ? <AccessSelect artifact={artifact} domain={domain} onChange={setArtifact} /> : null}
+        {artifact.draft ? (
+          <DraftBar
+            artifact={artifact}
+            disabled={sourceDirty}
+            onSaved={(entry) => {
+              setNavigationGuard(null)
+              setArtifact(entry)
+              reload()
+            }}
+            onDiscarded={discarded}
+          />
+        ) : artifact.can_manage ? (
+          <AccessSelect artifact={artifact} domain={domain} onChange={setArtifact} />
+        ) : null}
         <span className="flex-1" />
-        <ArtifactLibrary artifact={artifact} onChanged={reload} />
+        {!artifact.draft ? <ArtifactLibrary artifact={artifact} onChanged={reload} /> : null}
         <Button
           onClick={() => setPromptOpen(true)}
           className="h-7"
@@ -424,7 +484,28 @@ export function Editor({ id }: { id: string }) {
         </LinkButton>
       </Header>
       <McpDialog open={promptOpen} onClose={() => setPromptOpen(false)} artifact={artifact} />
-      <Workbench artifact={artifact} version={version} reload={reload} page={page} />
+      <Dialog
+        open={leaveTo !== null}
+        onClose={() => setLeaveTo(null)}
+        dismissible={!leaving}
+        title="Leave without saving?"
+      >
+        <p className="mb-4 text-sm text-muted">This draft is deleted when you discard and leave.</p>
+        {leaveError ? (
+          <p role="alert" className="text-sm text-danger">
+            {leaveError}
+          </p>
+        ) : null}
+        <div className="flex justify-end gap-2">
+          <Button disabled={leaving} onClick={() => setLeaveTo(null)}>
+            Keep editing
+          </Button>
+          <Button disabled={leaving} onClick={() => void discardAndLeave()}>
+            Discard and leave
+          </Button>
+        </div>
+      </Dialog>
+      <Workbench artifact={artifact} version={version} reload={reload} page={page} onDirtyChange={setSourceDirty} />
     </div>
   )
 }

@@ -8,7 +8,7 @@ export function App() {
     case 'list':
       return <ArtifactList />
     case 'edit':
-      return <Editor id={route.id} />
+      return <Editor key={route.id} id={route.id} />
     default:
       return (
         <div className="p-8 text-sm text-muted">

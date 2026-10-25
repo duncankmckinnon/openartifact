@@ -12,6 +12,7 @@
 
 import { type DeckController, initDeck } from './deck.ts'
 import type {} from './embed.ts'
+import { guidePage, guideRequested, guideType, renderGuide } from './guide.ts'
 import hljsCss from './hljs.css'
 import { isolateSvg, outlineAtLoad, svgRequested } from './outline.ts'
 import { buildPage } from './page.ts'
@@ -19,6 +20,7 @@ import { hideText, measureScene, prepareScene, sceneRequested } from './scene.ts
 import { splitPages } from './split.ts'
 import deckCss from './styles/deck.css'
 import documentCss from './styles/document.css'
+import guideCss from './styles/guide.css'
 import pageCss from './styles/page.css'
 import proseCss from './styles/prose.css'
 import sharedCss from './styles/shared.css'
@@ -81,6 +83,7 @@ function main(): void {
     theme: data.config.theme ?? 'light',
   }
   const root = document.getElementById('root') ?? document.body
+  if (guideRequested()) config.type = guideType(config.type)
 
   // Shared tokens first, then the type's own sheets, then code colours, then the user's styles.css so it wins. The
   // user's sheet is already in <head> as a live <style>; appending it again moves it after the ones just added.
@@ -91,6 +94,14 @@ function main(): void {
   if (userStyles) document.head.append(userStyles)
   // The theme class goes on <html> too so `@media print` body rules can scope by theme.
   document.documentElement.classList.add(`theme-${config.theme}`)
+
+  if (guideRequested()) {
+    addStyle(guideCss)
+    renderGuide(root, data, config)
+    window.openartifact = { type: config.type, title: config.title, deck: null }
+    if (window.self !== window.top) reportPosition(null, 3, guidePage(config.type))
+    return
+  }
 
   const raw = splitPages(data.markdown)
   if (raw.every((page) => page.body.trim() === '')) {
@@ -156,14 +167,14 @@ function main(): void {
  * `{ type: 'openartifact:page', page, total }` (1-based) to the parent on the same origin. The editor's preview
  * listens so the chat can say what the user is looking at. A document or page artifact reports page 1 once.
  */
-function reportPosition(deck: DeckController | null, total: number): void {
+function reportPosition(deck: DeckController | null, total: number, initialPage = 1): void {
   const post = (page: number) =>
     window.parent.postMessage({ type: 'openartifact:page', page, total }, window.location.origin)
   if (deck) {
     post(deck.position().index + 1)
     deck.onChange((position) => post(position.index + 1))
   } else {
-    post(1)
+    post(initialPage)
   }
 }
 

@@ -15,10 +15,38 @@ export function parseRoute(pathname: string): Route {
 }
 
 const listeners = new Set<() => void>()
+let guard: ((to: string) => boolean) | null = null
+let position = Number(window.history.state?.oaIndex ?? 0)
+let currentPath = window.location.pathname + window.location.search + window.location.hash
+let restoring = false
+window.history.replaceState({ ...window.history.state, oaIndex: position }, '', currentPath)
+
+export function setNavigationGuard(value: ((to: string) => boolean) | null): void {
+  guard = value
+}
+
+window.addEventListener('popstate', () => {
+  if (restoring) {
+    restoring = false
+    return
+  }
+  const next = Number(window.history.state?.oaIndex ?? 0)
+  const path = window.location.pathname + window.location.search + window.location.hash
+  if (path !== currentPath && guard && !guard(path)) {
+    restoring = true
+    window.history.go(position - next)
+    return
+  }
+  position = next
+  currentPath = path
+  for (const listener of listeners) listener()
+})
 
 /** Go to a path within the app without a full page load. */
 export function navigate(path: string): void {
-  window.history.pushState(null, '', path)
+  if (path !== currentPath && guard && !guard(path)) return
+  window.history.pushState({ oaIndex: ++position }, '', path)
+  currentPath = path
   for (const listener of listeners) listener()
 }
 
@@ -28,10 +56,8 @@ export function useRoute(): Route {
   useEffect(() => {
     const update = () => setRoute(parseRoute(window.location.pathname))
     listeners.add(update)
-    window.addEventListener('popstate', update)
     return () => {
       listeners.delete(update)
-      window.removeEventListener('popstate', update)
     }
   }, [])
   return route
