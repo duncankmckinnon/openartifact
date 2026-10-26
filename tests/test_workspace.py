@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 import auth
+import chats
 import db
 import store
 import workspace
@@ -52,6 +53,38 @@ async def test_first_edit_creates_repo_bundle_and_head(principal: auth.Principal
     assert (await workspace.artifact_git(artifact.id, 'status', '--porcelain')) == ''
     assert await storage.exists(workspace.bundle_key(artifact.id, sha))
     assert await workspace.list_artifacts(ws) == [artifact]
+
+
+async def test_drafts_are_not_listed(principal: auth.Principal):
+    artifact_id = uuid.uuid4()
+    create = workspace.NewArtifact(principal.workspace_id, 'Draft', 'deck', preset_kind='template', draft=True)
+    async with workspace.edit(artifact_id, 'new draft', create=create) as tx:
+        (tx.path / 'main.md').write_text('# Draft\n')
+    found = await workspace.get_artifact(artifact_id)
+    assert found is not None and found.draft
+    assert await workspace.list_artifacts(principal.workspace_id) == []
+
+
+async def test_delete_artifact_removes_row_bundles_checkout_and_chat(
+    principal: auth.Principal, storage: store.ObjectStore
+):
+    artifact = await write_artifact(principal.workspace_id)
+    async with workspace.edit(artifact.id, 'second commit') as tx:
+        (tx.path / 'main.md').write_text('# Second\n')
+    await chats.save(artifact.id, principal.user_id, [], None)
+    assert len(await storage.list(f'artifacts/{artifact.id}/')) == 2
+    await workspace.delete_artifact(artifact.id)
+    assert await workspace.get_artifact(artifact.id) is None
+    assert await storage.list(f'artifacts/{artifact.id}/') == []
+    assert not workspace.checkout_path(artifact.id).parent.exists()
+    assert await chats.load(artifact.id, principal.user_id) == ([], None)
+    assert not await db.pool().fetchval('SELECT EXISTS (SELECT FROM chats WHERE artifact_id = $1)', artifact.id)
+    assert not await db.pool().fetchval('SELECT EXISTS (SELECT FROM artifact_deletions)')
+    with pytest.raises(LookupError):
+        await workspace.delete_artifact(artifact.id)
+    with pytest.raises(LookupError):
+        async with workspace.open_artifact(artifact):
+            pytest.fail('a deleted artifact must not be recreated by a stale reader')
 
 
 async def test_create_rolls_back_with_the_body(principal: auth.Principal):

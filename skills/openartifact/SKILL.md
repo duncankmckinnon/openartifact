@@ -15,6 +15,10 @@ This file is what every artifact needs. Read a reference file when the task call
 
 Over MCP they are the resources `skill://openartifact/references/<name>.md`.
 
+For styles or templates from files and links, follow
+`skill://openartifact-templates/references/deconstructing.md`. External clients read references with their own
+tools; use `upload_url` for deliberately kept images and `add_font` for local Google Fonts assets.
+
 ## Using the MCP server
 
 The tools: `new_personal_artifact(title, content, public, type, theme, build=True)` and `new_org_artifact(title, content, org_editable, public, type, theme, build=True)` create an artifact, a directory of source files identified by the UUID it returns, and build it (personal: yours alone unless public; organisation: seen by your Google Workspace organisation, edited by it when `org_editable`, open to anyone with the link when `public`; ask the user which they want); `set_access(artifact, public, org_editable)` changes that later and `fork(artifact)` copies an artifact you can see into your own, history included; `run_code(artifact, code, inputs)` runs Python in a sandbox with the artifact directory as its working directory, for writing and editing files; `upload_url(artifact, files)` returns signed URLs to `PUT` local files to; `build(artifact)` validates the files and refreshes the page; `list_artifacts()` lists yours and the ones shared with you. Every call that changes files is a commit. Build errors name the file and line.

@@ -41,6 +41,8 @@ export interface Artifact {
   org_editable: boolean
   forked_from: string | null
   preset_kind: 'template' | 'style' | null
+  draft: boolean
+  version: string | null
   created_at: string
   updated_at: string
   owner_email: string | null
@@ -154,11 +156,16 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
 }
 
 export const api = {
+  artifact: (id: string) => request<Artifact>(`/api/artifacts/${id}`),
   me: () => request<Me>('/api/me'),
   configure: () => request<Configure>('/api/configure'),
   artifacts: () => request<ArtifactList>('/api/artifacts'),
   create: (body: NewArtifact) => request<Artifact>('/api/artifacts', { method: 'POST', body: JSON.stringify(body) }),
   presets: () => request<Presets>('/api/presets'),
+  thumbnailUrl: (entry: Artifact) => `/api/presets/${entry.id}/thumbnail?v=${entry.version ?? ''}`,
+  saveDraft: (id: string, name: string) =>
+    request<Artifact>(`/api/drafts/${id}/save`, { method: 'POST', body: JSON.stringify({ name }) }),
+  discardDraft: (id: string) => request<void>(`/api/drafts/${id}/discard`, { method: 'POST' }),
   savePreset: (body: NewPreset) => request<Artifact>('/api/presets', { method: 'POST', body: JSON.stringify(body) }),
   removePreset: (id: string) => request<void>(`/api/presets/${id}`, { method: 'DELETE' }),
   applyStyle: (id: string, styleId: string) =>
@@ -178,6 +185,25 @@ export const api = {
 
 /** The artifact `/edit/<id>` is about: the list is the only endpoint that returns rows, so look it up there. */
 export async function findArtifact(id: string): Promise<Artifact | null> {
-  const { mine, shared } = await api.artifacts()
-  return [...mine, ...shared].find((a) => a.id === id) ?? null
+  try {
+    return await api.artifact(id)
+  } catch (error) {
+    if (error instanceof ApiError && error.status === 404) return null
+    throw error
+  }
+}
+
+export const ATTACH_ACCEPT = '.pdf,.pptx,.docx,.png,.jpg,.jpeg,.gif,.webp,.svg'
+export const ATTACH_LIMITS = { files: 5, totalBytes: 20 * 1024 * 1024, imageBytes: 5 * 1024 * 1024 }
+export function checkAttachments(files: File[]): string | null {
+  if (files.length > ATTACH_LIMITS.files) return 'Attach up to five files'
+  if (files.reduce((total, file) => total + file.size, 0) > ATTACH_LIMITS.totalBytes)
+    return 'Attachments are limited to 20 MB in all'
+  for (const file of files) {
+    if (!ATTACH_ACCEPT.split(',').some((ext) => file.name.toLowerCase().endsWith(ext)))
+      return `${file.name}: attach a PDF, PowerPoint or Word file, or an image`
+    if (/\.(png|jpe?g|gif|webp|svg)$/i.test(file.name) && file.size > ATTACH_LIMITS.imageBytes)
+      return `${file.name} is over 5 MB`
+  }
+  return null
 }

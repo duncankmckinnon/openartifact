@@ -10,7 +10,15 @@ from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
-from pydantic_ai.messages import ModelMessage, ModelRequest, ModelResponse, TextPart, ToolReturnPart, UserPromptPart
+from pydantic_ai.messages import (
+    BinaryContent,
+    ModelMessage,
+    ModelRequest,
+    ModelResponse,
+    TextPart,
+    ToolReturnPart,
+    UserPromptPart,
+)
 from pydantic_ai.models.function import AgentInfo, DeltaToolCall, DeltaToolCalls, FunctionModel
 from test_server import STARTER, in_app, org_members, sign_in, starter
 
@@ -86,6 +94,8 @@ def test_description_creates_a_reusable_template_with_the_bundled_skill(
 
     async def stream(messages: list[ModelMessage], info: AgentInfo) -> AsyncIterator[str | DeltaToolCalls]:
         instructions = info.instructions or ''
+        assert 'unsaved draft' in instructions
+        assert 'save_draft' not in {t.name for t in info.function_tools}
         # This model's tool behavior depends on receiving the template-specific authoring contract.
         if 'Reusable template authoring' not in instructions:
             yield 'Template authoring instructions were not provided.'
@@ -108,20 +118,32 @@ def test_description_creates_a_reusable_template_with_the_bundled_skill(
     chunks = send(client, template['id'], 'Create a reusable team update template with highlights and a team name.')
     assert not any(c.get('type') == 'error' for c in chunks), chunks
     assert client.get(f'/api/artifacts/{template["id"]}/source').json()['content'] == reusable
+    assert client.post(f'/api/drafts/{template["id"]}/save', json={'name': 'Team updates'}).status_code == 200
     copy = client.post('/api/artifacts', json={'template_id': template['id']})
     assert copy.status_code == 201, copy.text
     assert client.get(f'/artifacts/{copy.json()["id"]}/').status_code == 200
 
 
-def send(client: TestClient, artifact_id: Any, text: str, model: str | None = 'test') -> list[dict[str, Any]]:
+def send(
+    client: TestClient,
+    artifact_id: Any,
+    text: str,
+    model: str | None = 'test',
+    parts: list[dict[str, Any]] | None = None,
+    page: int | None = None,
+) -> list[dict[str, Any]]:
     """One turn, as the browser sends it: the new message only, plus the model; returns the parsed SSE chunks."""
     body: dict[str, Any] = {
         'id': 'chat-1',
         'trigger': 'submit-message',
-        'messages': [{'id': 'u1', 'role': 'user', 'parts': [{'type': 'text', 'text': text}]}],
+        'messages': [
+            {'id': 'u1', 'role': 'user', 'parts': parts if parts is not None else [{'type': 'text', 'text': text}]}
+        ],
     }
     if model is not None:
         body['model'] = model
+    if page is not None:
+        body['page'] = page
     response = client.post(f'/api/artifacts/{artifact_id}/chat', json=body)
     assert response.status_code == 200, response.text
     assert response.headers['content-type'].startswith('text/event-stream')
@@ -130,6 +152,165 @@ def send(client: TestClient, artifact_id: Any, text: str, model: str | None = 't
         for line in response.text.splitlines()
         if line.startswith('data: ') and line != 'data: [DONE]'
     ]
+
+
+@pytest.mark.parametrize('kind', ['pdf', 'svg', 'pptx'])
+def test_references_reach_the_model_but_not_stored_history(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, kind: str
+):
+    from test_attachments import file_part, powerpoint
+
+    starter(client)
+    draft = client.post('/api/presets', json={'name': 'References', 'kind': 'style'}).json()
+    payload = (
+        b'%PDF-1.4 secret-reference'
+        if kind == 'pdf'
+        else b'<svg>secret-reference</svg>'
+        if kind == 'svg'
+        else powerpoint()
+    )
+    mime = {'pdf': 'application/pdf', 'svg': 'image/svg+xml', 'pptx': 'application/octet-stream'}[kind]
+    file = file_part(f'brand.{kind}', mime, payload)
+    seen = False
+
+    async def stream(messages: list[ModelMessage], info: AgentInfo) -> AsyncIterator[str | DeltaToolCalls]:
+        nonlocal seen
+        assert 'Look, then report' in (info.instructions or '')
+        assert 'unsaved draft' in (info.instructions or '')
+        request = messages[-1]
+        assert isinstance(request, ModelRequest)
+        prompt = next(p for p in request.parts if isinstance(p, UserPromptPart))
+        assert not isinstance(prompt.content, str)
+        if kind == 'pdf':
+            assert any(isinstance(c, BinaryContent) and c.media_type == 'application/pdf' for c in prompt.content)
+        else:
+            assert any(
+                isinstance(c, str) and ('secret-reference' in c if kind == 'svg' else 'FF6B4A' in c)
+                for c in prompt.content
+            )
+        seen = True
+        yield 'I will use a restrained palette and clear headings.'
+
+    use_model(monkeypatch, FunctionModel(stream_function=stream))
+    chunks = send(client, draft['id'], '', parts=[file.model_dump(by_alias=True, exclude_none=True)])
+    assert seen and not any(c['type'] == 'error' for c in chunks)
+    restored = client.get(f'/api/artifacts/{draft["id"]}/chat').json()
+    serialized = json.dumps(restored)
+    assert 'Attached brand.' in serialized
+    assert 'secret-reference' not in serialized and 'FF6B4A' not in serialized
+    assert not any(p['type'] == 'file' for m in restored['messages'] for p in m['parts'])
+    assert not any(workspace.checkout_path(uuid.UUID(draft['id'])).rglob('*.pptx'))
+
+
+def test_keep_image_deliberately_writes_a_reference(client: TestClient, monkeypatch: pytest.MonkeyPatch):
+    from test_attachments import file_part
+
+    starter(client)
+    draft = client.post('/api/presets', json={'name': 'Logo', 'kind': 'style'}).json()
+
+    async def stream(messages: list[ModelMessage], info: AgentInfo) -> AsyncIterator[str | DeltaToolCalls]:
+        if not tool_returns(messages):
+            yield {
+                0: DeltaToolCall(
+                    name='keep_image', json_args=json.dumps({'source': 'logo.png', 'path': 'assets/logo.png'})
+                )
+            }
+        else:
+            yield 'Kept the logo.'
+
+    use_model(monkeypatch, FunctionModel(stream_function=stream))
+    file = file_part('logo.png', 'image/png', b'logo bytes')
+    chunks = send(client, draft['id'], '', parts=[file.model_dump(by_alias=True, exclude_none=True)])
+    assert not any(c['type'] == 'error' for c in chunks), chunks
+    assert (workspace.checkout_path(uuid.UUID(draft['id'])) / 'assets/logo.png').read_bytes() == b'logo bytes'
+
+
+def test_style_chat_context_matches_the_selected_guide(client: TestClient, monkeypatch: pytest.MonkeyPatch):
+    starter(client)
+    draft = client.post('/api/presets', json={'name': 'Guide context', 'kind': 'style'}).json()
+
+    async def stream(messages: list[ModelMessage], info: AgentInfo) -> AsyncIterator[str | DeltaToolCalls]:
+        assert 'viewing the document style guide; screenshot page 2 matches' in (info.instructions or '')
+        yield 'I will check the document guide.'
+
+    use_model(monkeypatch, FunctionModel(stream_function=stream))
+    chunks = send(client, draft['id'], 'Check this guide', page=2)
+    assert not any(c['type'] == 'error' for c in chunks), chunks
+
+
+def test_ordinary_chat_restyles_from_a_link(client: TestClient, monkeypatch: pytest.MonkeyPatch):
+    import httpx2
+    import links
+
+    artifact = starter(client)
+    original = (workspace.checkout_path(artifact.id) / 'main.md').read_bytes()
+
+    async def download(url: str, **kwargs: Any) -> httpx2.Response:
+        return httpx2.Response(
+            200,
+            text='<title>Brand</title><style>:root{--brand:#ff6b4a}</style>',
+            headers={'content-type': 'text/html'},
+            request=httpx2.Request('GET', url),
+        )
+
+    async def stream(messages: list[ModelMessage], info: AgentInfo) -> AsyncIterator[str | DeltaToolCalls]:
+        results = tool_returns(messages)
+        if not results:
+            yield {0: DeltaToolCall(name='look_at_link', json_args=json.dumps({'url': 'https://harbor.example/'}))}
+        elif len(results) == 1:
+            assert '#ff6b4a' in str(results[0].content)
+            yield {
+                0: DeltaToolCall(
+                    name='run_code',
+                    json_args=json.dumps(
+                        {
+                            'artifact': str(artifact.id),
+                            'code': "from pathlib import Path\nPath('styles.css').write_text(':root { --accent: #ff6b4a }')",
+                        }
+                    ),
+                )
+            }
+        elif len(results) == 2:
+            yield {0: DeltaToolCall(name='build', json_args=json.dumps({'artifact': str(artifact.id)}))}
+        else:
+            yield 'Applied a warm coral accent while keeping the content.'
+
+    monkeypatch.setattr(links, 'download', download)
+    use_model(monkeypatch, FunctionModel(stream_function=stream))
+    chunks = send(client, artifact.id, 'Make this look like https://harbor.example/')
+    assert not any(c['type'] == 'error' for c in chunks), chunks
+    assert (workspace.checkout_path(artifact.id) / 'main.md').read_bytes() == original
+    assert '#ff6b4a' in (workspace.checkout_path(artifact.id) / 'styles.css').read_text()
+    restored = client.get(f'/api/artifacts/{artifact.id}/chat').json()
+    link_result = next(p for m in restored['messages'] for p in m['parts'] if p['type'] == 'tool-look_at_link')
+    assert 'Reference inspected during that turn' in link_result['output']
+
+
+def test_file_uploads_are_drafts_only_and_request_size_is_bounded(client: TestClient, monkeypatch: pytest.MonkeyPatch):
+    import attachments
+    from test_attachments import file_part
+
+    artifact = starter(client)
+    body = {
+        'id': 'c',
+        'trigger': 'submit-message',
+        'messages': [
+            {
+                'id': 'u',
+                'role': 'user',
+                'parts': [file_part('a.png', 'image/png', b'x').model_dump(by_alias=True, exclude_none=True)],
+            }
+        ],
+    }
+    response = client.post(f'/api/artifacts/{artifact.id}/chat', json=body)
+    assert response.status_code == 400 and 'draft' in response.text
+    monkeypatch.setattr(attachments, 'MAX_REQUEST_BYTES', 10)
+    response = client.post(
+        f'/api/artifacts/{artifact.id}/chat',
+        content=iter([b'x' * 8, b'x' * 8]),
+        headers={'content-type': 'application/json'},
+    )
+    assert response.status_code == 413
 
 
 def test_chat_edits_the_artifact_as_the_viewer(client: TestClient, monkeypatch: pytest.MonkeyPatch):

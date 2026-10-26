@@ -13,16 +13,18 @@ export function Preview({
   version,
   page,
   onDeck,
+  guide = false,
 }: {
   artifactId: string
   version: number
   page: number | null
   onDeck?: (deck: DeckController | null) => void
+  guide?: boolean
 }) {
   return (
     <iframe
       key={version}
-      src={`/artifacts/${artifactId}/?v=${version}${page ? `#${page}` : ''}`}
+      src={`/artifacts/${artifactId}/?${guide ? 'guide&type=document&' : ''}v=${version}${!guide && page ? `#${page}` : ''}`}
       title="Artifact preview"
       className="h-full w-full border-0 bg-bg"
       onLoad={(e) => onDeck?.(e.currentTarget.contentWindow?.openartifact?.deck ?? null)}

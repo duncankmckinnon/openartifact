@@ -1,28 +1,15 @@
-/** The personal library: reusable templates, imported CSS, and appearance controls in the editor. */
-
+/** Personal templates, styles and transient reference-driven creation. */
 import { BookOpen, Palette, Plus } from 'lucide-react'
 import { useEffect, useId, useState } from 'react'
-import { type Artifact, type ArtifactType, api, type Presets, type Theme } from '../api.ts'
+import { type Artifact, type ArtifactType, api, checkAttachments, type Presets, type Theme } from '../api.ts'
+import { setPending } from '../pending.ts'
 import { navigate } from '../router.ts'
+import { ReferencePicker } from './ReferencePicker.tsx'
+import { StyleGuide } from './StyleGuide.tsx'
 import { Button, Dialog, Field, LinkButton, Select, Spinner } from './ui.tsx'
 
 const INPUT = 'w-full rounded-lg border border-line bg-bg px-3 py-2 text-sm outline-none focus:border-accent'
 const EMPTY: Presets = { templates: [], styles: [] }
-
-/** One-off draft storage lets the template brief follow navigation without appearing in the URL. */
-export function templateBriefKey(id: string): string {
-  return `openartifact:template-brief:${id}`
-}
-
-function TypeSelect({ value, onChange }: { value: ArtifactType; onChange: (type: ArtifactType) => void }) {
-  return (
-    <Select id="template-type" value={value} onChange={(e) => onChange(e.target.value as ArtifactType)}>
-      <option value="deck">Deck</option>
-      <option value="document">Document</option>
-      <option value="page">Page</option>
-    </Select>
-  )
-}
 
 function StyleSelect({
   styles,
@@ -47,16 +34,55 @@ function StyleSelect({
   )
 }
 
-/** A home-screen library with template authoring, CSS import, and independent artifact creation. */
+function LibraryCard({ entry, selected, onSelect }: { entry: Artifact; selected: boolean; onSelect: () => void }) {
+  const [failed, setFailed] = useState(false)
+  const aspect =
+    entry.preset_kind === 'style' || entry.type === 'deck'
+      ? 'aspect-video'
+      : entry.type === 'document'
+        ? 'aspect-[210/297]'
+        : 'aspect-[4/3]'
+  return (
+    <button
+      type="button"
+      aria-pressed={selected}
+      onClick={onSelect}
+      className={`overflow-hidden rounded-lg border bg-bg text-left ${selected ? 'border-accent ring-1 ring-accent' : 'border-line'}`}
+    >
+      {failed ? (
+        <div className={`${aspect} flex items-center justify-center bg-raised text-3xl text-muted`}>
+          {entry.title[0]}
+        </div>
+      ) : (
+        <img
+          className={`${aspect} w-full object-cover object-top`}
+          loading="lazy"
+          alt=""
+          src={api.thumbnailUrl(entry)}
+          onError={() => setFailed(true)}
+        />
+      )}
+      <div className="p-2">
+        <div className="truncate text-sm font-medium">{entry.title}</div>
+        <span className="text-xs text-muted">{entry.preset_kind === 'style' ? 'Style' : entry.type}</span>
+      </div>
+    </button>
+  )
+}
+
 export function Library({ entries, refresh }: { entries: Presets; refresh: () => Promise<void> }) {
   const [mode, setMode] = useState<'template' | 'style' | 'use' | null>(null)
   const [template, setTemplate] = useState<Artifact | null>(null)
+  const [selectedTemplate, selectTemplate] = useState<string | null>(null)
+  const [selectedStyle, selectStyle] = useState<string | null>(null)
   const [name, setName] = useState('')
   const [type, setType] = useState<ArtifactType>('deck')
   const [brief, setBrief] = useState('')
   const [css, setCss] = useState('')
   const [theme, setTheme] = useState<Theme>('light')
   const [style, setStyle] = useState('')
+  const [files, setFiles] = useState<File[]>([])
+  const [links, setLinks] = useState<string[]>([])
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const open = (next: 'template' | 'style' | 'use', entry?: Artifact) => {
@@ -64,11 +90,18 @@ export function Library({ entries, refresh }: { entries: Presets; refresh: () =>
     setBrief('')
     setCss('')
     setStyle('')
+    setFiles([])
+    setLinks([])
     setError(null)
     setTemplate(entry ?? null)
     setMode(next)
   }
   const submit = async () => {
+    const invalid = checkAttachments(files)
+    if (invalid) {
+      setError(invalid)
+      return
+    }
     setBusy(true)
     setError(null)
     try {
@@ -76,16 +109,17 @@ export function Library({ entries, refresh }: { entries: Presets; refresh: () =>
         const created = await api.create({ template_id: template.id, title: name, style_id: style || undefined })
         navigate(`/edit/${created.id}`)
       } else {
+        const kind = mode === 'style' ? 'style' : 'template'
         const created = await api.savePreset(
-          mode === 'style' ? { name, kind: 'style', css, theme } : { name, kind: 'template', type },
+          kind === 'style' ? { name, kind, css: css || undefined, theme } : { name, kind, type },
         )
-        if (mode === 'template') {
-          if (brief.trim()) sessionStorage.setItem(templateBriefKey(created.id), brief.trim())
-          navigate(`/edit/${created.id}`)
-        } else {
-          setMode(null)
-          await refresh()
-        }
+        const references = links.map((link) => link.trim()).filter(Boolean)
+        let text = brief.trim()
+        if (!text && (files.length || references.length))
+          text = `Work out the visual language of these references and build the first version of this ${kind}.`
+        if (references.length) text += `\n\nReference links:\n${references.map((link) => `- ${link}`).join('\n')}`
+        if (text || files.length) setPending(created.id, { text, files })
+        navigate(`/edit/${created.id}`)
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
@@ -127,7 +161,7 @@ export function Library({ entries, refresh }: { entries: Presets; refresh: () =>
         </Button>
       </div>
       <p className="mb-4 text-sm text-muted">
-        Describe a template in chat, or save one from an artifact. Your library is private.
+        Build from descriptions, files or links. Save to keep an entry in your private library.
       </p>
       {error && !mode ? (
         <p role="alert" className="mb-2 text-sm text-danger">
@@ -135,52 +169,55 @@ export function Library({ entries, refresh }: { entries: Presets; refresh: () =>
         </p>
       ) : null}
       <div className="grid gap-4 sm:grid-cols-2">
-        {(['templates', 'styles'] as const).map((kind) => (
-          <div key={kind} className="rounded-xl border border-line bg-panel p-4">
-            <h3 className="mb-3 flex items-center gap-2 text-sm font-semibold">
-              {kind === 'templates' ? <BookOpen size={15} /> : <Palette size={15} />}
-              {kind === 'templates' ? 'Templates' : 'Styles'}
-            </h3>
-            {entries[kind].length === 0 ? (
-              <p className="text-xs text-muted">
-                {kind === 'templates'
-                  ? 'Create a reusable layout from a description, then use it for new artifacts.'
-                  : 'Add your CSS or save an artifact’s appearance from its editor.'}
-              </p>
-            ) : (
-              <ul className="space-y-3">
+        {(['templates', 'styles'] as const).map((kind) => {
+          const selected = entries[kind].find(
+            (entry) => entry.id === (kind === 'templates' ? selectedTemplate : selectedStyle),
+          )
+          return (
+            <div key={kind} className="min-w-0 rounded-xl border border-line bg-panel p-4">
+              <h3 className="mb-3 flex items-center gap-2 text-sm font-semibold">
+                {kind === 'templates' ? <BookOpen size={15} /> : <Palette size={15} />}
+                {kind === 'templates' ? 'Templates' : 'Styles'}
+              </h3>
+              {!entries[kind].length ? (
+                <p className="text-xs text-muted">
+                  Create a {kind === 'templates' ? 'template' : 'style'} from references or a description.
+                </p>
+              ) : null}
+              <div className="grid grid-cols-2 items-start gap-3 lg:grid-cols-3">
                 {entries[kind].map((entry) => (
-                  <li key={entry.id} className="border-t border-line pt-3">
-                    <div className="mb-2 flex items-center gap-2">
-                      <span className="min-w-0 flex-1 truncate font-medium">{entry.title}</span>
-                      {kind === 'templates' ? <span className="text-xs text-muted">{entry.type}</span> : null}
-                    </div>
-                    <div className="flex flex-wrap gap-2">
-                      {kind === 'templates' ? (
-                        <Button variant="primary" disabled={busy} onClick={() => open('use', entry)}>
-                          Use template
-                        </Button>
-                      ) : null}
-                      <Button onClick={() => navigate(`/edit/${entry.id}`)} disabled={busy}>
-                        Edit
-                      </Button>
-                      <LinkButton href={entry.url} target="_blank" rel="noopener">
-                        Preview
-                      </LinkButton>
-                      <Button
-                        onClick={() => void remove(entry)}
-                        disabled={busy}
-                        title="Remove from the library; the artifact and its history are kept"
-                      >
-                        Remove
-                      </Button>
-                    </div>
-                  </li>
+                  <LibraryCard
+                    key={`${entry.id}:${entry.version}`}
+                    entry={entry}
+                    selected={selected?.id === entry.id}
+                    onSelect={() => (kind === 'templates' ? selectTemplate(entry.id) : selectStyle(entry.id))}
+                  />
                 ))}
-              </ul>
-            )}
-          </div>
-        ))}
+              </div>
+              {selected ? (
+                <div className="mt-3 flex flex-wrap gap-2">
+                  {kind === 'templates' ? (
+                    <Button variant="primary" disabled={busy} onClick={() => open('use', selected)}>
+                      Use template
+                    </Button>
+                  ) : null}
+                  <Button onClick={() => navigate(`/edit/${selected.id}`)} disabled={busy}>
+                    Edit
+                  </Button>
+                  {kind === 'templates' ? (
+                    <LinkButton href={selected.url} target="_blank" rel="noopener">
+                      Preview
+                    </LinkButton>
+                  ) : null}
+                  <Button onClick={() => void remove(selected)} disabled={busy}>
+                    Remove
+                  </Button>
+                </div>
+              ) : null}
+              {selected && kind === 'styles' ? <StyleGuide styleId={selected.id} version={selected.version} /> : null}
+            </div>
+          )
+        })}
       </div>
       <Dialog
         open={mode !== null}
@@ -189,7 +226,7 @@ export function Library({ entries, refresh }: { entries: Presets; refresh: () =>
           if (!busy) setMode(null)
         }}
         title={mode === 'style' ? 'Add a style' : mode === 'use' ? 'Use template' : 'Create a template'}
-        wide={mode === 'style'}
+        wide
       >
         <form
           onSubmit={(e) => {
@@ -210,73 +247,75 @@ export function Library({ entries, refresh }: { entries: Presets; refresh: () =>
             />
           </Field>
           {mode === 'template' ? (
+            <Field id="template-type" label="Make it a">
+              <Select
+                id="template-type"
+                value={type}
+                onChange={(e) => setType(e.target.value as ArtifactType)}
+                disabled={busy}
+              >
+                <option value="deck">Deck</option>
+                <option value="document">Document</option>
+                <option value="page">Page</option>
+              </Select>
+            </Field>
+          ) : null}
+          {mode === 'style' ? (
+            <Field id="style-theme" label="Base theme">
+              <Select
+                id="style-theme"
+                value={theme}
+                onChange={(e) => setTheme(e.target.value as Theme)}
+                disabled={busy}
+              >
+                <option value="light">Light</option>
+                <option value="dark">Dark</option>
+              </Select>
+            </Field>
+          ) : null}
+          {mode !== 'use' ? (
             <>
-              <Field id="template-type" label="Artifact type">
-                <TypeSelect value={type} onChange={setType} />
-              </Field>
-              <Field id="template-brief" label="Describe your template">
+              <ReferencePicker files={files} links={links} onFiles={setFiles} onLinks={setLinks} disabled={busy} />
+              <Field id="library-brief" label="Describe">
                 <textarea
-                  id="template-brief"
+                  id="library-brief"
                   className={INPUT}
-                  rows={5}
+                  rows={3}
                   value={brief}
                   onChange={(e) => setBrief(e.target.value)}
-                  placeholder="A monthly board report with a cover, key metrics, progress, risks and next steps. Use a clean layout with blue accents."
+                  disabled={busy}
+                  placeholder="What should this be used for? References can supply the visual direction."
                 />
               </Field>
-              <p className="text-xs text-muted">
-                The template-authoring skill builds your description in chat using your configured model. You can
-                refine it beside the live preview.
-              </p>
             </>
           ) : null}
           {mode === 'style' ? (
-            <>
-              <Field id="style-theme" label="Base theme">
-                <Select id="style-theme" value={theme} onChange={(e) => setTheme(e.target.value as Theme)}>
-                  {(['light', 'dark', 'markdown-light', 'markdown-dark'] as const).map((value) => (
-                    <option key={value} value={value}>
-                      {value}
-                    </option>
-                  ))}
-                </Select>
-              </Field>
-              <Field id="css-file" label="Import a CSS file">
-                <input
-                  id="css-file"
-                  type="file"
-                  accept=".css,text/css"
-                  onChange={(e) => void importCss(e.target.files?.[0])}
-                  disabled={busy}
-                />
-              </Field>
+            <details>
+              <summary className="cursor-pointer text-sm">Start from CSS instead</summary>
+              <input
+                type="file"
+                accept=".css,text/css"
+                aria-label="Import CSS"
+                className="my-3 text-sm"
+                disabled={busy}
+                onChange={(e) => void importCss(e.target.files?.[0])}
+              />
               <Field id="library-css" label="CSS">
                 <textarea
                   id="library-css"
                   className={`${INPUT} font-mono`}
-                  rows={10}
+                  rows={8}
                   value={css}
                   onChange={(e) => setCss(e.target.value)}
-                  placeholder=":root { --accent: #2563eb; }"
-                  required
                   disabled={busy}
                 />
               </Field>
-              <p className="text-xs text-muted">
-                To include local images or fonts, save a style from an artifact that already contains those files.
-                Combine CSS imports first.
-              </p>
-            </>
+            </details>
           ) : null}
           {mode === 'use' ? (
-            <>
-              <Field id="template-style" label="Style">
-                <StyleSelect id="template-style" styles={entries.styles} value={style} onChange={setStyle} />
-              </Field>
-              <p className="text-xs text-muted">
-                Creates a private copy with its own files. Later template edits affect future copies.
-              </p>
-            </>
+            <Field id="template-style" label="Style">
+              <StyleSelect id="template-style" styles={entries.styles} value={style} onChange={setStyle} />
+            </Field>
           ) : null}
           {error ? (
             <p role="alert" className="text-sm text-danger">
@@ -287,9 +326,9 @@ export function Library({ entries, refresh }: { entries: Presets; refresh: () =>
             <Button type="button" onClick={() => setMode(null)} disabled={busy}>
               Cancel
             </Button>
-            <Button type="submit" variant="primary" disabled={busy || !name.trim()}>
+            <Button type="submit" variant="primary" disabled={busy || !name.trim() || !!checkAttachments(files)}>
               {busy ? <Spinner /> : null}
-              {mode === 'style' ? 'Save style' : mode === 'use' ? 'Create artifact' : 'Create with chat'}
+              {mode === 'use' ? 'Create artifact' : 'Create with chat'}
             </Button>
           </div>
         </form>

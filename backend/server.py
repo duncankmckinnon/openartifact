@@ -53,6 +53,7 @@ from typing import Any
 from urllib.parse import quote
 
 import powerpoint
+import presets
 import render
 import word
 from fastapi import FastAPI, HTTPException, Request
@@ -111,7 +112,13 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
         async with pool.acquire() as conn:
             await db.migrate(conn)
         config.cache_dir().mkdir(parents=True, exist_ok=True)
-        yield
+        sweep = asyncio.create_task(presets.sweep_drafts_forever())
+        try:
+            yield
+        finally:
+            sweep.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await sweep
 
 
 # `auto_configure=False` stops FastAPI adding its own OTLP exporters from `OTEL_*` variables: Logfire owns export here,

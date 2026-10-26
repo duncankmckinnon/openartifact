@@ -57,6 +57,13 @@ def test_missing_chrome_reports_command(tmp_path: Path, monkeypatch: pytest.Monk
     assert exc_info.value.stderr == ''
 
 
+def test_screenshot_accepts_half_scale(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    fake_chrome(tmp_path, monkeypatch, WRITES_PNG)
+    target = tmp_path / 'half.png'
+    pdf.screenshot(URL, target, 800, 450, scale=0.5)
+    assert '--force-device-scale-factor=0.5' in (tmp_path / 'half.png.args').read_text()
+
+
 def test_container_flags(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(pdf, 'find_chrome', lambda: None)
     monkeypatch.setenv('CHROME_NO_SANDBOX', '1')

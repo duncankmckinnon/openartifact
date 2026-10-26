@@ -217,17 +217,25 @@ export function Dialog({
   dismissible?: boolean
 }) {
   const ref = useRef<HTMLDialogElement>(null)
+  const closingFromProp = useRef(false)
   useEffect(() => {
     const dialog = ref.current
     if (!dialog) return
     if (open && !dialog.open) dialog.showModal()
-    if (!open && dialog.open) dialog.close()
+    if (!open && dialog.open) {
+      closingFromProp.current = true
+      dialog.close()
+    }
   }, [open])
   return (
     // biome-ignore lint/a11y/useKeyWithClickEvents: the click closes on the backdrop only; Escape is native
     <dialog
       ref={ref}
-      onClose={onClose}
+      onClose={() => {
+        // A queued close event from a prop change must not close a dialog that was just reopened.
+        if (closingFromProp.current) closingFromProp.current = false
+        else onClose()
+      }}
       onCancel={(event) => {
         if (!dismissible) event.preventDefault()
       }}

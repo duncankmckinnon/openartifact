@@ -46,7 +46,7 @@ class ScreenshotRequest(BaseModel):
     width: int = Field(1600, ge=200, le=4000)
     height: int = Field(900, ge=200, le=4000)
     """The device pixel ratio: the PNG is `scale` times the window in each direction."""
-    scale: int = Field(1, ge=1, le=3)
+    scale: float = Field(1, ge=0.5, le=3)
 
 
 class SceneRequest(BaseModel):

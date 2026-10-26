@@ -2,17 +2,184 @@
 
 from __future__ import annotations
 
+import asyncio
+import threading
 import tomllib
+import uuid
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+import asyncpg
 import presets
 import pytest
 
 import auth
 import build
+import db
+import store
 import workspace
 
 pytestmark = pytest.mark.anyio
+
+
+async def test_draft_is_unlisted_until_saved(principal: auth.Principal):
+    draft = await presets.create(principal.workspace_id, 'Brand', 'deck', kind='template', draft=True)
+    assert draft.draft
+    assert await workspace.list_artifacts(principal.workspace_id) == []
+    result = await presets.save_draft(draft, 'Harbor')
+    assert (result.id, result.draft, result.title) == (draft.id, False, 'Harbor')
+    assert await workspace.list_artifacts(principal.workspace_id) == [result]
+    async with workspace.open_artifact(result) as directory:
+        assert build.load_config(directory).title == 'Harbor'
+
+
+async def test_saving_a_broken_draft_is_refused_and_kept(principal: auth.Principal):
+    draft = await presets.create(principal.workspace_id, 'Brand', 'deck', kind='template', draft=True)
+    async with workspace.edit(draft.id, 'broken source') as tx:
+        (tx.path / 'main.md').write_text('# {{ UNKNOWN }}\n')
+    before = await presets.saved(draft.id)
+    with pytest.raises(build.BuildError, match='UNKNOWN'):
+        await presets.save_draft(draft, 'Changed title')
+    assert await presets.saved(draft.id) == before
+    async with workspace.open_artifact(before) as directory:
+        assert build.load_config(directory).title == 'Brand'
+        assert 'UNKNOWN' in (directory / 'main.md').read_text()
+
+
+async def test_save_upload_failure_keeps_the_original_draft(principal: auth.Principal, monkeypatch: pytest.MonkeyPatch):
+    draft = await presets.create(principal.workspace_id, 'Brand', 'page', kind='style', draft=True)
+
+    async def unavailable(self: store.ObjectStore, key: str, data: bytes) -> None:
+        raise OSError('store unavailable')
+
+    monkeypatch.setattr(store.ObjectStore, 'put', unavailable)
+    with pytest.raises(OSError, match='store unavailable'):
+        await presets.save_draft(draft, 'Harbor')
+    assert await presets.saved(draft.id) == draft
+    async with workspace.open_artifact(draft) as directory:
+        assert build.load_config(directory).title == 'Brand'
+
+
+async def test_discard_deletes_the_draft(principal: auth.Principal):
+    draft = await presets.create(principal.workspace_id, 'Brand', 'page', kind='style', draft=True)
+    await presets.discard_draft(draft)
+    assert await workspace.get_artifact(draft.id) is None
+
+
+async def test_saved_entry_cannot_be_discarded_with_a_stale_draft(principal: auth.Principal):
+    draft = await presets.create(principal.workspace_id, 'Brand', 'page', kind='style', draft=True)
+    saved = await presets.save_draft(draft, 'Brand')
+    with pytest.raises(build.BuildError, match='draft'):
+        await presets.discard_draft(draft)
+    with pytest.raises(build.BuildError, match='draft'):
+        await presets.save_draft(draft, 'Another title')
+    assert await presets.saved(draft.id) == saved
+
+
+async def test_save_holds_the_row_lock_during_validation(principal: auth.Principal, monkeypatch: pytest.MonkeyPatch):
+    draft = await presets.create(principal.workspace_id, 'Brand', 'page', kind='style', draft=True)
+    validating, finish = asyncio.Event(), threading.Event()
+    loop = asyncio.get_running_loop()
+    validate = build.build_page_data
+
+    def paused_validation(cfg: build.Config, *, css_validator: build.CssValidator | None = None) -> dict[str, object]:
+        loop.call_soon_threadsafe(validating.set)
+        if not finish.wait(5):
+            raise TimeoutError('test did not release validation')
+        return validate(cfg, css_validator=css_validator)
+
+    monkeypatch.setattr(build, 'build_page_data', paused_validation)
+    task = asyncio.create_task(presets.save_draft(draft, 'Harbor'))
+    try:
+        await asyncio.wait_for(validating.wait(), 5)
+        async with db.pool().acquire() as conn, conn.transaction():
+            with pytest.raises(asyncpg.LockNotAvailableError):
+                await conn.fetchrow('SELECT id FROM artifacts WHERE id = $1 FOR UPDATE NOWAIT', draft.id)
+    finally:
+        finish.set()
+        result = await asyncio.wait_for(task, 5)
+    assert not result.draft and result.title == 'Harbor'
+
+
+async def test_sweep_deletes_only_idle_drafts(principal: auth.Principal):
+    idle = await presets.create(principal.workspace_id, 'Idle', 'page', kind='style', draft=True)
+    fresh = await presets.create(principal.workspace_id, 'Fresh', 'page', kind='style', draft=True)
+    saved = await presets.create(principal.workspace_id, 'Saved', 'page', kind='style')
+    await db.pool().execute(
+        "UPDATE artifacts SET updated_at = now() - interval '25 hours' WHERE id = ANY($1::uuid[])",
+        [idle.id, saved.id],
+    )
+    assert await presets.sweep_drafts() == 1
+    assert await workspace.get_artifact(idle.id) is None
+    assert await workspace.get_artifact(fresh.id) is not None
+    assert await workspace.get_artifact(saved.id) is not None
+
+
+@pytest.mark.parametrize('change', ['edit', 'save'])
+async def test_sweep_rechecks_candidates_after_changes(
+    principal: auth.Principal, monkeypatch: pytest.MonkeyPatch, change: str
+):
+    draft = await presets.create(principal.workspace_id, 'Brand', 'page', kind='style', draft=True)
+    await db.pool().execute("UPDATE artifacts SET updated_at = now() - interval '25 hours' WHERE id = $1", draft.id)
+    selected, changed = asyncio.Event(), asyncio.Event()
+    delete = workspace.delete_artifact
+
+    async def after_change(
+        artifact_id: uuid.UUID,
+        *,
+        draft_workspace_id: uuid.UUID | None = None,
+        expired_before: datetime | None = None,
+    ) -> bool:
+        selected.set()
+        await changed.wait()
+        return await delete(artifact_id, draft_workspace_id=draft_workspace_id, expired_before=expired_before)
+
+    monkeypatch.setattr(workspace, 'delete_artifact', after_change)
+    task = asyncio.create_task(presets.sweep_drafts())
+    try:
+        await asyncio.wait_for(selected.wait(), 5)
+        if change == 'edit':
+            async with workspace.edit(draft.id, 'still editing') as tx:
+                (tx.path / 'main.md').write_text('# Still editing\n')
+        else:
+            await presets.save_draft(draft, 'Keep me')
+    finally:
+        changed.set()
+        count = await asyncio.wait_for(task, 5)
+    assert count == 0
+    found = await presets.saved(draft.id)
+    assert found.updated_at > datetime.now(UTC) - timedelta(hours=1)
+    assert found.draft == (change == 'edit')
+
+
+async def test_sweep_retries_cleanup_after_row_deletion(
+    principal: auth.Principal, storage: store.ObjectStore, monkeypatch: pytest.MonkeyPatch
+):
+    draft = await presets.create(principal.workspace_id, 'Brand', 'page', kind='style', draft=True)
+    async with workspace.edit(draft.id, 'second version') as tx:
+        (tx.path / 'main.md').write_text('# Updated\n')
+    assert len(await storage.list(f'artifacts/{draft.id}/')) == 2
+    delete = store.ObjectStore.delete
+    attempts = 0
+
+    async def unavailable(self: store.ObjectStore, key: str) -> None:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 2:
+            raise OSError('store unavailable')
+        await delete(self, key)
+
+    monkeypatch.setattr(store.ObjectStore, 'delete', unavailable)
+    # Discard succeeds logically even when external cleanup must be retried.
+    await presets.discard_draft(draft)
+    assert await workspace.get_artifact(draft.id) is None
+    assert len(await storage.list(f'artifacts/{draft.id}/')) == 1
+    assert await db.pool().fetchval('SELECT artifact_id FROM artifact_deletions') == draft.id
+    monkeypatch.setattr(store.ObjectStore, 'delete', delete)
+    assert await presets.sweep_drafts() == 0
+    assert await storage.list(f'artifacts/{draft.id}/') == []
+    assert not workspace.checkout_path(draft.id).parent.exists()
+    assert not await db.pool().fetchval('SELECT EXISTS (SELECT FROM artifact_deletions)')
 
 
 async def source_artifact(principal: auth.Principal, tmp_path: Path) -> workspace.Artifact:
@@ -86,7 +253,17 @@ async def test_style_copies_only_appearance_and_namespaces_assets(principal: aut
             assert (directory / match.group('path').split('?')[0].split('#')[0]).is_file()
 
 
-@pytest.mark.parametrize('css', ['@import "other.css";', '.page {background:url(../secret.png)}', '</style>'])
+@pytest.mark.parametrize(
+    'css',
+    [
+        '@import "other.css";',
+        '.page {background:url(../secret.png)}',
+        '</style>',
+        '.page {background:url(https://example.com/logo.png)}',
+        '@font-face {src:url(https://example.com/font.woff2)}',
+        '.page {background:url(/logo.png)}',
+    ],
+)
 async def test_invalid_style_does_not_create_a_library_entry(principal: auth.Principal, css: str):
     with pytest.raises(build.BuildError):
         await presets.create(principal.workspace_id, 'Broken', 'page', css=css, kind='style')

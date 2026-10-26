@@ -2,14 +2,16 @@
 
 from __future__ import annotations
 
+import threading
 import uuid
 from collections.abc import Iterator
 from pathlib import Path
 
+import presets
 import pytest
 from conftest import DEV_TOKEN
 from fastapi.testclient import TestClient
-from test_server import in_app, org_members, seed_starter, sign_in, sign_out, starter
+from test_server import in_app, org_members, seed_starter, sign_in, sign_out, starter, stub_chrome
 
 import config
 import server
@@ -55,6 +57,7 @@ def test_personal_library_workflow(client: TestClient):
     style = client.post('/api/presets', json={'name': 'Purple', 'kind': 'style', 'css': ':root {--accent: purple}'})
     assert style.status_code == 201, style.text
     style = style.json()
+    assert client.post(f'/api/drafts/{style["id"]}/save', json={'name': 'Purple'}).status_code == 200
     entries = client.get('/api/presets').json()
     assert [a['id'] for a in entries['templates']] == [template['id']]
     assert [a['id'] for a in entries['styles']] == [style['id']]
@@ -76,10 +79,11 @@ def test_library_permissions_and_invalid_inputs(client: TestClient):
     original = starter(client)
     colleague, outsider = org_members(client)
     style = client.post('/api/presets', json={'name': 'Brand', 'kind': 'style', 'css': 'p {color:red}'}).json()
+    assert client.post(f'/api/drafts/{style["id"]}/save', json={'name': 'Brand'}).status_code == 200
     assert client.post('/api/artifacts', json={'template_id': style['id']}).status_code == 400
     assert client.post('/api/presets', json={'name': ' ', 'kind': 'template'}).status_code == 400
     assert client.post('/api/presets', json={'name': 'Bad', 'kind': 'style', 'css': '</style>'}).status_code == 400
-    assert client.post('/api/presets', json={'name': 'Bad', 'kind': 'style'}).status_code == 400
+    assert client.post('/api/presets', json={'name': 'Blank', 'kind': 'style'}).status_code == 201
     assert client.post('/api/presets', json={'name': 'Bad', 'kind': 'other'}).status_code == 422
     cross = {'sec-fetch-site': 'cross-site'}
     assert client.post('/api/presets', json={'name': 'Cross', 'kind': 'template'}, headers=cross).status_code == 403
@@ -113,6 +117,86 @@ def test_create_template_for_description_workflow(client: TestClient):
     assert client.get(f'/artifacts/{template["id"]}/').status_code == 200
 
 
+def test_draft_lifecycle_and_permissions(client: TestClient):
+    starter(client)
+    owner, _ = in_app(client, seed_starter)
+    colleague, _ = org_members(client)
+    draft = client.post('/api/presets', json={'name': 'Report', 'kind': 'template', 'type': 'document'}).json()
+    ident = draft['id']
+    assert draft['draft'] and draft['version']
+    assert ident not in {a['id'] for a in client.get('/api/artifacts').json()['mine']}
+    assert client.get('/api/presets').json()['templates'] == []
+    assert client.patch(f'/api/artifacts/{ident}', json={'public': True}).status_code == 400
+    assert client.post('/api/artifacts', json={'template_id': ident}).status_code == 404
+    for route in ('save', 'discard'):
+        assert (
+            client.post(
+                f'/api/drafts/{ident}/{route}', json={'name': 'Report'}, headers={'sec-fetch-site': 'cross-site'}
+            ).status_code
+            == 403
+        )
+    sign_in(client, colleague)
+    assert client.post(f'/api/drafts/{ident}/save', json={'name': 'Other'}).status_code == 404
+    assert client.post(f'/api/drafts/{ident}/discard').status_code == 404
+    sign_in(client, owner)
+    client.put(f'/api/artifacts/{ident}/source', json={'content': '# {{ UNKNOWN }}\n'})
+    broken = client.post(f'/api/drafts/{ident}/save', json={'name': 'Board report'})
+    assert broken.status_code == 400 and 'UNKNOWN' in broken.json()['detail']
+    assert str(workspace.checkout_path(uuid.UUID(ident))) not in broken.text
+    client.put(f'/api/artifacts/{ident}/source', json={'content': '# Report\n'})
+    saved = client.post(f'/api/drafts/{ident}/save', json={'name': 'Board report'})
+    assert saved.status_code == 200 and not saved.json()['draft']
+    assert client.get('/api/presets').json()['templates'][0]['title'] == 'Board report'
+    other = client.post('/api/presets', json={'name': 'Discard', 'kind': 'style'}).json()
+    assert client.post(f'/api/drafts/{other["id"]}/discard').status_code == 204
+    assert client.get(f'/api/artifacts/{other["id"]}/source').status_code == 404
+
+
+def test_saved_entry_thumbnails_are_cached_per_version(client: TestClient, monkeypatch: pytest.MonkeyPatch):
+    original = starter(client)
+    entry = client.post(
+        '/api/presets', json={'artifact_id': str(original.id), 'kind': 'template', 'name': 'Thumb'}
+    ).json()
+    asked = stub_chrome(monkeypatch, 200, b'png')
+    url = f'/api/presets/{entry["id"]}/thumbnail?v={entry["version"]}'
+    for _ in range(2):
+        response = client.get(url)
+        assert response.status_code == 200 and response.content == b'png'
+        assert response.headers['cache-control'] == 'private, max-age=86400'
+    assert len(asked) == 1 and asked[0].endswith(' 1600x900')
+    client.put(f'/api/artifacts/{entry["id"]}/source', json={'content': '# New version\n'})
+    assert client.get(url).status_code == 409
+    updated = client.get(f'/api/artifacts/{entry["id"]}').json()
+    assert client.get(f'/api/presets/{entry["id"]}/thumbnail?v={updated["version"]}').status_code == 200
+    assert len(asked) == 2
+
+
+def test_style_thumbnail_is_a_saved_guide_or_a_service_error(client: TestClient, monkeypatch: pytest.MonkeyPatch):
+    starter(client)
+    entry = client.post('/api/presets', json={'kind': 'style', 'name': 'Thumb'}).json()
+    url = f'/api/presets/{entry["id"]}/thumbnail'
+    assert client.get(url).status_code == 404
+    client.post(f'/api/drafts/{entry["id"]}/save', json={'name': 'Thumb'})
+    monkeypatch.delenv('OPENARTIFACT_CHROME_URL', raising=False)
+    assert client.get(url).status_code == 503
+    asked = stub_chrome(monkeypatch, 200, b'png')
+    assert client.get(url).status_code == 200
+    assert '?guide&type=document' in asked[0] and asked[0].endswith(' 800x450')
+
+
+def test_lifespan_starts_and_stops_draft_sweeper(server_env: None, monkeypatch: pytest.MonkeyPatch):
+    ran = threading.Event()
+
+    async def sweep() -> int:
+        ran.set()
+        return 0
+
+    monkeypatch.setattr(presets, 'sweep_drafts', sweep)
+    monkeypatch.setattr(presets, 'SWEEP_INTERVAL', 0.01)
+    with TestClient(server.app):
+        assert ran.wait(2)
+
+
 def test_source_edit_survives_invalid_config_and_respects_custom_paths(client: TestClient):
     artifact = starter(client)
 
@@ -134,6 +218,7 @@ def test_source_edit_survives_invalid_config_and_respects_custom_paths(client: T
 def test_new_artifact_with_a_saved_style_and_on_demand_css_validation(client: TestClient):
     starter(client)
     style = client.post('/api/presets', json={'name': 'Blue', 'kind': 'style', 'css': 'p {color: blue}'}).json()
+    assert client.post(f'/api/drafts/{style["id"]}/save', json={'name': 'Blue'}).status_code == 200
     response = client.post('/api/artifacts', json={'type': 'page', 'style_id': style['id']})
     assert response.status_code == 201, response.text
     artifact = response.json()
