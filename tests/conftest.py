@@ -10,7 +10,8 @@ from __future__ import annotations
 import asyncio
 import os
 import secrets
-from collections.abc import AsyncGenerator, Iterator
+import sys
+from collections.abc import AsyncGenerator, Callable, Iterator
 from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
 
@@ -37,6 +38,23 @@ TABLES = (
     'chats',
     'artifact_deletions',
 )
+
+
+@pytest.fixture
+def fake_cli(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Callable[[str], Path]:
+    """Install a deterministic model process, without requiring a CLI login or contacting a provider."""
+
+    def install(backend: str) -> Path:
+        executable = tmp_path / backend
+        source = (Path(__file__).parent / 'fixtures' / 'model_cli.py').read_text()
+        executable.write_text(f'#!{sys.executable}\n{source}')
+        executable.chmod(0o700)
+        monkeypatch.setenv('PATH', f'{tmp_path}{os.pathsep}{os.environ["PATH"]}')
+        capture = tmp_path / 'capture.json'
+        monkeypatch.setenv('CLI_TEST_CAPTURE', str(capture))
+        return capture
+
+    return install
 
 
 @pytest.fixture(scope='session')

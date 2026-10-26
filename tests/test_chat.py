@@ -5,7 +5,8 @@ from __future__ import annotations
 
 import json
 import uuid
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator, Callable, Iterator
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -363,6 +364,26 @@ def artifact_owner(client: TestClient) -> Any:
     from test_server import seed_starter
 
     return in_app(client, seed_starter)[0].user_id
+
+
+@pytest.mark.parametrize('backend', ['codex', 'claude'])
+def test_host_cli_edits_builds_and_keeps_chat_history(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, fake_cli: Callable[[str], Path], backend: str
+):
+    fake_cli(backend)
+    monkeypatch.setenv('OPENARTIFACT_MODELS', f'cli:{backend}=Host CLI')
+    artifact = starter(client)
+    before = in_app(client, lambda: workspace.artifact_git(artifact.id, 'rev-parse', 'HEAD'))
+    chunks = send(client, artifact.id, 'Change the heading', model=f'cli:{backend}')
+    assert not any(c['type'] in ('error', 'tool-output-error') for c in chunks), chunks
+    assert [c['toolName'] for c in chunks if c['type'] == 'tool-input-available'] == ['run_code', 'build']
+    assert (workspace.checkout_path(artifact.id) / 'main.md').read_text() == '# CLI edit\n'
+    assert in_app(client, lambda: workspace.artifact_git(artifact.id, 'rev-parse', 'HEAD')) != before
+    stored = client.get(f'/api/artifacts/{artifact.id}/chat').json()
+    assert stored['model'] == f'cli:{backend}'
+    assert len(stored['messages']) == 2
+    assert send(client, artifact.id, 'Continue', model=f'cli:{backend}')[-1]['type'] == 'finish'
+    assert len(client.get(f'/api/artifacts/{artifact.id}/chat').json()['messages']) == 4
 
 
 def test_chat_tool_errors_are_reported_and_the_run_continues(client: TestClient, monkeypatch: pytest.MonkeyPatch):

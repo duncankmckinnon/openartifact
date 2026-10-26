@@ -596,6 +596,7 @@ async def chat(artifact_id: str, request: Request) -> Response:
     page = page if isinstance(page, int) and not isinstance(page, bool) and page >= 1 else None
     try:
         chosen = agent.check_model(model_id if isinstance(model_id, str) else None)
+        model = agent.resolve_model(chosen)
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
     history, _ = await chats.load(found.id, viewer.user_id)
@@ -618,7 +619,7 @@ async def chat(artifact_id: str, request: Request) -> Response:
         try:
             async for event in adapter.run_stream(
                 message_history=history,
-                model=agent.resolve_model(chosen),
+                model=model,
                 deps=agent.ChatDeps(artifact=found, viewer=viewer, page=page, files=files),
                 conversation_id=f'{found.id}:{viewer.user_id}',
                 usage_limits=UsageLimits(request_limit=agent.REQUEST_LIMIT),

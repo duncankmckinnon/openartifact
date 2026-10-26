@@ -32,6 +32,7 @@ from pydantic_ai.tools import ToolDefinition
 
 import auth
 import build
+import cli_models
 import mcp_server
 import upload
 import workspace
@@ -262,6 +263,8 @@ def check_model(model_id: str | None) -> str:
 
 def resolve_model(model_id: str) -> Model | str:
     """The model pydantic-ai runs for a configured id. Tests replace this with a scripted model."""
+    if model_id.startswith('cli:'):
+        return cli_models.CLIModel(model_id)
     return model_id
 
 

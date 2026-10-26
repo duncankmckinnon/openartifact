@@ -67,7 +67,7 @@ mccabe = { max-complexity = 14 }
 
 [tool.ruff.lint.isort]
 combine-as-imports = true
-known-first-party = ["access", "agent", "api", "auth", "build", "chats", "config", "db", "chrome", "login", "mcp_server", "pages", "server", "signing", "store", "upload", "workspace"]
+known-first-party = ["access", "agent", "api", "auth", "build", "chats", "cli_models", "config", "db", "chrome", "login", "mcp_server", "pages", "server", "signing", "store", "upload", "workspace"]
 
 [tool.ruff.format]
 docstring-code-format = true
